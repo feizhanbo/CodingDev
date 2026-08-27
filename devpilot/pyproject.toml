@@ -1,0 +1,35 @@
+[project]
+name = "devpilot"
+version = "0.1.0"
+description = "DevPilot - an AI agent system for software development."
+requires-python = ">=3.12"
+dependencies = [
+    "openai",
+    "pydantic>=2",
+    "pydantic-settings",
+    "typer",
+    "rich",
+    "pyyaml",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[project.scripts]
+devpilot = "devpilot.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["devpilot"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

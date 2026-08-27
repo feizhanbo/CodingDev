@@ -1,0 +1,15 @@
+id: DEV-001
+title: Support order status filter
+description: |
+  订单列表接口需要支持 status 查询条件。
+  GET /orders?status=paid 应仅返回 paid 订单。
+  非法 status 返回 HTTP 400。
+  不传 status 时保持当前行为。
+  必须新增测试。
+acceptance_criteria:
+  - GET /orders?status=paid 仅返回 paid 订单
+  - 非法 status 返回 HTTP 400
+  - 不传 status 时保持当前行为
+  - 必须新增测试
+constraints:
+  - API response schema 不允许变化

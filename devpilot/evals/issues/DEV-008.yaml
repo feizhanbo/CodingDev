@@ -1,0 +1,15 @@
+id: DEV-008
+title: Add audit fields to Order
+description: |
+  Order model needs audit fields: updated_at, paid_at, cancelled_at.
+  These fields should be set automatically when status changes.
+  GET /orders/{id} should include these fields in response.
+acceptance_criteria:
+  - Order has updated_at field (set on any update)
+  - Order has paid_at field (set when status becomes paid)
+  - Order has cancelled_at field (set when status becomes cancelled)
+  - GET /orders/{id} includes audit fields
+  - Must add tests for audit field behavior
+constraints:
+  - Existing fields must not be removed
+  - Migration should handle existing data (set null for old orders)

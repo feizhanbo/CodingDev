@@ -1,0 +1,13 @@
+id: DEV-004
+title: Fix percentage coupon calculation error
+description: |
+  percentage 类型优惠券计算有误。
+  当前实现使用 total * (discount_value / 100) 但对大额折扣未做上限校验。
+  折扣金额不应超过订单总额。
+acceptance_criteria:
+  - percentage 折扣不超过订单总额
+  - discount_value=100 时折扣等于总额
+  - discount_value>100 时折扣封顶为总额
+  - 现有 fixed 类型不受影响
+constraints:
+  - 不修改 Coupon 模型

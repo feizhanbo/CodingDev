@@ -1,0 +1,13 @@
+id: DEV-005
+title: Optimize order detail N+1 query
+description: |
+  GET /orders/{id} 对每个 OrderItem 单独查询 Product，存在 N+1 问题。
+  大订单（1000 items）响应时间超过 2 秒。
+  需要使用批量查询策略优化。
+acceptance_criteria:
+  - GET /orders/{id} 响应时间 < 500ms（1000 items 场景）
+  - API response schema 不变
+  - 现有行为保持正确
+constraints:
+  - 不修改 API response schema
+  - 不引入新的依赖

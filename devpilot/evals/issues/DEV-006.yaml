@@ -1,0 +1,13 @@
+id: DEV-006
+title: Email normalization for customers
+description: |
+  Customer email addresses should be normalized (lowercase, trimmed) before storage.
+  Currently, emails are stored as-is which causes duplicate customer issues.
+  POST /customers (if existed) and any email field should normalize.
+acceptance_criteria:
+  - Email stored in lowercase
+  - Leading/trailing whitespace trimmed
+  - Existing API behavior unchanged except for normalization
+  - Must add tests for normalization
+constraints:
+  - Do not change API response schema

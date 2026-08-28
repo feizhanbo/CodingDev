@@ -56,17 +56,17 @@ class LoopGuard:
     def check_duplicate_action(self, decision: AgentDecision) -> None:
         """Check for repeated identical tool calls.
 
-        After 4 consecutive identical tool+args, raise DuplicateActionDetected.
+        After 6 consecutive identical tool+args, raise DuplicateActionDetected.
         """
         if not decision.action:
             return
         key = f"{decision.action.tool}:{json.dumps(decision.action.arguments, sort_keys=True)}"
         self._recent_tool_calls.append(key)
-        if len(self._recent_tool_calls) > 4:
-            self._recent_tool_calls = self._recent_tool_calls[-4:]
-        if len(self._recent_tool_calls) >= 4:
-            last_four = self._recent_tool_calls[-4:]
-            if all(k == last_four[-1] for k in last_four):
+        if len(self._recent_tool_calls) > 6:
+            self._recent_tool_calls = self._recent_tool_calls[-6:]
+        if len(self._recent_tool_calls) >= 6:
+            last_six = self._recent_tool_calls[-6:]
+            if all(k == last_six[-1] for k in last_six):
                 raise DuplicateActionDetected(
                     f"Repeated identical tool call: {decision.action.tool}"
                 )

@@ -2,21 +2,30 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
+from typing import Any
 
 from devpilot.agents.developer import DeveloperAgent
 from devpilot.domain.decision import AgentDecision, FinishIntent
 from devpilot.domain.result import AgentRunResult
-from devpilot.domain.state import DevPilotState
+from devpilot.domain.state import DevPilotState, Observation
 from devpilot.domain.task import DevelopmentTask
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.runtime.custom.context import ContextBuilder
-from devpilot.runtime.custom.loop_guard import GuardrailViolation, LoopGuard
+from devpilot.runtime.custom.loop_guard import (
+    GuardrailViolation,
+    LoopGuard,
+    MaxRetriesExceeded,
+)
 from devpilot.runtime.custom.state_manager import StateManager
 from devpilot.tools.context import ToolContext
 from devpilot.tools.registry import ToolRegistry
+from devpilot.tracing import MetricsCollector, TraceWriter
+from devpilot.verification import TaskVerifier
 from devpilot.workspace.sandbox import SandboxWorkspace
 
 
@@ -33,6 +42,9 @@ class CustomAgentRunner:
         loop_guard: LoopGuard,
         config: RuntimeConfig,
         on_event: Callable[[str, dict], None] | None = None,
+        verifier: TaskVerifier | None = None,
+        trace_writer: TraceWriter | None = None,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         self.agent = agent
         self.registry = registry
@@ -42,11 +54,30 @@ class CustomAgentRunner:
         self.loop_guard = loop_guard
         self.config = config
         self.on_event = on_event
+        self.verifier = verifier
+        self.trace_writer = trace_writer
+        self.metrics = metrics or MetricsCollector()
 
     def _emit(self, event_type: str, data: dict) -> None:
         """Emit a progress event to the optional callback."""
         if self.on_event:
             self.on_event(event_type, data)
+
+    def _trace(
+        self,
+        run_id: str,
+        step: int,
+        phase: str,
+        event: str,
+        tool: str | None = None,
+        arguments_summary: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Write a trace event if trace_writer is available."""
+        if self.trace_writer:
+            self.trace_writer.write_event(
+                run_id, step, phase, event, tool, arguments_summary, data
+            )
 
     async def run(self, task: DevelopmentTask) -> AgentRunResult:
         """Execute the agent loop for a development task."""
@@ -55,12 +86,14 @@ class CustomAgentRunner:
         # 1. Initialize state
         run_id = f"run_{uuid.uuid4().hex[:8]}"
         state = self.state_manager.create(task, run_id)
+        self.metrics.start_time = start_time
         self._emit("run_started", {
             "task_id": task.id,
             "run_id": run_id,
             "phase": state.phase,
             "acceptance_criteria_count": len(task.acceptance_criteria),
         })
+        self._trace(run_id, 0, state.phase, "run_started")
 
         # 2. Create workspace
         workspace_path = self.sandbox.create(run_id)
@@ -71,39 +104,186 @@ class CustomAgentRunner:
                 self.loop_guard.check_max_steps(state)
 
                 messages = self.context_builder.build(state, workspace_path)
-                decision = await self.agent.decide(messages)
+                # Retry LLM call on empty/error responses
+                decision = None
+                for _attempt in range(3):
+                    try:
+                        decision = await self.agent.decide(messages)
+                        break
+                    except (ValueError, Exception) as exc:
+                        if _attempt == 2:
+                            raise
+                        import logging
+                        logging.warning(
+                            "LLM call attempt %d failed: %s, retrying...",
+                            _attempt + 1, str(exc)[:200],
+                        )
+                        continue
+                decision_type = (
+                    "finish" if decision.finish
+                    else "action" if decision.action
+                    else "plan_update"
+                )
                 self._emit("agent_decision", {
                     "task_id": task.id,
                     "phase": state.phase,
-                    "decision_type": (
-                        "finish" if decision.finish
-                        else "action" if decision.action
-                        else "plan_update"
-                    ),
+                    "decision_type": decision_type,
                 })
+                self._trace(
+                    run_id, state.total_steps, state.phase,
+                    "agent_decision",
+                    data={"decision_type": decision_type},
+                )
 
+                # CHECK FOR FINISH
                 if decision.finish:
                     self.state_manager.request_completion(state)
-                    old_phase = state.phase
-                    self.state_manager.transition_phase(state, "completed")
-                    self._emit("phase_changed", {
-                        "task_id": task.id,
-                        "from": old_phase,
-                        "to": "completed",
-                    })
-                    result = self._build_result(
-                        state, start_time, decision.finish
-                    )
-                    self._save_artifacts(run_id, state, result)
-                    self._emit("run_completed", {
-                        "task_id": task.id,
-                        "run_id": run_id,
-                        "status": result.status,
-                        "summary": result.summary,
-                        "total_steps": result.total_steps,
-                    })
-                    return result
 
+                    # Run verifier if available
+                    if self.verifier:
+                        self._emit("verifier_started", {
+                            "task_id": task.id,
+                            "phase": state.phase,
+                        })
+                        self._trace(
+                            run_id, state.total_steps, state.phase,
+                            "verifier_started",
+                        )
+                        verification = await self.verifier.verify(
+                            task, workspace_path, state, self.registry
+                        )
+                        self._emit("verifier_result", {
+                            "task_id": task.id,
+                            "success": verification.success,
+                            "failure_reason": verification.failure_reason,
+                        })
+                        self._trace(
+                            run_id, state.total_steps, state.phase,
+                            "verifier_result",
+                            data=verification.model_dump(),
+                        )
+
+                        if verification.success:
+                            # COMPLETED - verifier passed
+                            old_phase = state.phase
+                            self.state_manager.transition_phase(
+                                state, "completed"
+                            )
+                            self._emit("phase_changed", {
+                                "task_id": task.id,
+                                "from": old_phase,
+                                "to": "completed",
+                            })
+                            result = self._build_result(
+                                state, start_time, decision.finish
+                            )
+                            self._save_artifacts(run_id, state, result)
+                            self._emit("run_completed", {
+                                "task_id": task.id,
+                                "run_id": run_id,
+                                "status": result.status,
+                                "summary": result.summary,
+                                "total_steps": result.total_steps,
+                            })
+                            self._trace(
+                                run_id, state.total_steps, "completed",
+                                "run_completed",
+                            )
+                            return result
+                        else:
+                            # VERIFIER REJECTED - feed failure back to agent
+                            self.metrics.record_finish_rejected()
+                            self.state_manager.increment_retry(state)
+
+                            # Check max retries on verifier rejection
+                            if (
+                                state.retry_count
+                                >= self.config.max_test_retries
+                            ):
+                                self.state_manager.transition_phase(
+                                    state, "failed"
+                                )
+                                result = self._build_result(
+                                    state, start_time, None
+                                )
+                                result.error = (
+                                    f"Max retries ({self.config.max_test_retries})"
+                                    " exceeded after verifier rejection"
+                                )
+                                self._save_artifacts(
+                                    run_id, state, result
+                                )
+                                self._emit("run_failed", {
+                                    "task_id": task.id,
+                                    "run_id": run_id,
+                                    "error": result.error,
+                                })
+                                self._trace(
+                                    run_id, state.total_steps, "failed",
+                                    "run_failed",
+                                    data={"reason": result.error},
+                                )
+                                return result
+
+                            failure_obs = Observation(
+                                step_id=state.total_steps,
+                                source="verifier",
+                                name="verification_failed",
+                                success=False,
+                                summary=(
+                                    verification.failure_reason
+                                    or "Verification failed"
+                                ),
+                                data=verification.model_dump(),
+                            )
+                            self.state_manager.add_observation(
+                                state, failure_obs
+                            )
+
+                            # Transition back to implementing for repair
+                            if state.phase != "implementing":
+                                with suppress(ValueError):
+                                    self.state_manager.transition_phase(
+                                        state, "implementing"
+                                    )
+                            self._trace(
+                                run_id, state.total_steps, state.phase,
+                                "state_transition",
+                                data={
+                                    "reason": "verification_failed",
+                                    "failure": verification.failure_reason,
+                                },
+                            )
+                            continue
+                    else:
+                        # No verifier - just complete (backward compat)
+                        old_phase = state.phase
+                        self.state_manager.transition_phase(
+                            state, "completed"
+                        )
+                        self._emit("phase_changed", {
+                            "task_id": task.id,
+                            "from": old_phase,
+                            "to": "completed",
+                        })
+                        result = self._build_result(
+                            state, start_time, decision.finish
+                        )
+                        self._save_artifacts(run_id, state, result)
+                        self._emit("run_completed", {
+                            "task_id": task.id,
+                            "run_id": run_id,
+                            "status": result.status,
+                            "summary": result.summary,
+                            "total_steps": result.total_steps,
+                        })
+                        self._trace(
+                            run_id, state.total_steps, "completed",
+                            "run_completed",
+                        )
+                        return result
+
+                # EXECUTE TOOL
                 if decision.action:
                     self._emit("tool_called", {
                         "task_id": task.id,
@@ -111,6 +291,12 @@ class CustomAgentRunner:
                         "tool": decision.action.tool,
                         "arguments": decision.action.arguments,
                     })
+                    self._trace(
+                        run_id, state.total_steps, state.phase,
+                        "tool_call",
+                        tool=decision.action.tool,
+                        arguments_summary=str(decision.action.arguments),
+                    )
                     ctx = ToolContext(
                         workspace_root=workspace_path, run_id=run_id
                     )
@@ -123,9 +309,17 @@ class CustomAgentRunner:
                     )
 
                     self.state_manager.apply_tool_result(
-                        state, tool_result, decision.action.tool, tool_duration
+                        state, tool_result, decision.action.tool,
+                        tool_duration
                     )
                     self._maybe_advance_phase(state, decision)
+                    self.metrics.record_tool_call(tool_result.success)
+                    if (
+                        tool_result.data
+                        and "modified_files" in tool_result.data
+                    ):
+                        for f in tool_result.data["modified_files"]:
+                            self.metrics.record_modified_file(f)
                     self._emit("tool_result", {
                         "task_id": task.id,
                         "phase": state.phase,
@@ -137,10 +331,76 @@ class CustomAgentRunner:
                         ),
                         "data": tool_result.data,
                     })
+                    self._trace(
+                        run_id, state.total_steps, state.phase,
+                        "tool_result",
+                        tool=decision.action.tool,
+                        data={
+                            "success": tool_result.success,
+                            "summary": (
+                                "OK" if tool_result.success
+                                else (tool_result.error or "failed")
+                            ),
+                        },
+                    )
                     self.loop_guard.inspect(state, decision, tool_result)
 
+                    # Check if test.run failed - increment retry
+                    if (
+                        decision.action.tool == "test.run"
+                        and not tool_result.success
+                    ):
+                        self.metrics.record_test_retry()
+                        self.state_manager.increment_retry(state)
+                        try:
+                            self.loop_guard.check_test_retries(state)
+                        except MaxRetriesExceeded:
+                            self.state_manager.transition_phase(
+                                state, "failed"
+                            )
+                            result = self._build_result(
+                                state, start_time, None
+                            )
+                            result.error = "Max retries exceeded"
+                            self._save_artifacts(run_id, state, result)
+                            self._emit("run_failed", {
+                                "task_id": task.id,
+                                "run_id": run_id,
+                                "error": result.error,
+                            })
+                            self._trace(
+                                run_id, state.total_steps, "failed",
+                                "run_failed",
+                                data={"reason": "max_retries"},
+                            )
+                            return result
+
+                # Handle plan update
                 if decision.plan_update:
+                    if state.plan is None:
+                        self._trace(
+                            run_id, state.total_steps, state.phase,
+                            "plan_created",
+                        )
+                    else:
+                        self._trace(
+                            run_id, state.total_steps, state.phase,
+                            "plan_updated",
+                        )
                     state.plan = decision.plan_update
+
+                    # If only plan_update (no action), still increment step
+                    # and try to advance phase
+                    if not decision.action:
+                        obs = Observation(
+                            step_id=state.total_steps + 1,
+                            source="runtime",
+                            name="plan_update",
+                            success=True,
+                            summary=f"Plan updated (revision {state.plan.revision})",
+                        )
+                        self.state_manager.add_observation(state, obs)
+                        self._maybe_advance_phase(state, decision)
 
             # Exceeded max steps
             self.state_manager.transition_phase(state, "failed")
@@ -152,6 +412,7 @@ class CustomAgentRunner:
                 "run_id": run_id,
                 "error": result.error,
             })
+            self._trace(run_id, state.total_steps, "failed", "run_failed")
             return result
 
         except GuardrailViolation as e:
@@ -165,6 +426,15 @@ class CustomAgentRunner:
                 "run_id": run_id,
                 "error": result.error,
             })
+            self._trace(
+                run_id, state.total_steps, "failed", "run_failed",
+                data={"reason": str(e)},
+            )
+            self._trace(
+                run_id, state.total_steps, "failed",
+                "guardrail_triggered",
+                data={"violation": str(e)},
+            )
             return result
         except Exception as e:  # noqa: BLE001 - runner must not crash
             if state.phase not in ("completed", "failed"):
@@ -177,6 +447,10 @@ class CustomAgentRunner:
                 "run_id": run_id,
                 "error": result.error,
             })
+            self._trace(
+                run_id, state.total_steps, "failed", "run_failed",
+                data={"reason": str(e)},
+            )
             return result
 
     def _maybe_advance_phase(
@@ -185,18 +459,35 @@ class CustomAgentRunner:
         """Auto-advance phase based on tool usage patterns."""
         old_phase = state.phase
         new_phase: str | None = None
+
         if state.phase == "understanding" and decision.action:
-            if decision.action.tool.startswith("repo."):
+            if decision.action.tool.startswith("repo.") or decision.action.tool.startswith("repo_"):
                 new_phase = "exploring"
-        elif state.phase == "exploring" and decision.plan_update:
-            new_phase = "planning"
-        elif state.phase == "planning" and decision.action:
-            if decision.action.tool.startswith("code."):
+
+        elif state.phase == "exploring":
+            # Transition to planning if agent provides a plan or enough steps
+            if decision.plan_update or state.total_steps >= 10:
+                new_phase = "planning"
+            # If agent starts using code tools, skip to implementing
+            elif decision.action and (
+                decision.action.tool.startswith("code.")
+                or decision.action.tool.startswith("code_")
+            ):
                 new_phase = "implementing"
+
+        elif state.phase == "planning":
+            if (
+                decision.action and (
+                    decision.action.tool.startswith("code.")
+                    or decision.action.tool.startswith("code_")
+                )
+            ) or state.total_steps >= 15:
+                new_phase = "implementing"
+
         elif (
             state.phase == "implementing"
             and decision.action
-            and decision.action.tool == "test.run"
+            and (decision.action.tool == "test.run" or decision.action.tool == "test_run")
         ):
             new_phase = "verifying"
 
@@ -240,6 +531,12 @@ class CustomAgentRunner:
         self.sandbox.save_artifact(
             run_id, "state.json", self.state_manager.serialize(state)
         )
+        # Sync metrics with final state
+        self.metrics.total_steps = state.total_steps
+        for f in state.modified_files:
+            self.metrics.record_modified_file(f)
+        result_data = json.loads(result.model_dump_json(indent=2))
+        result_data["metrics"] = self.metrics.to_dict()
         self.sandbox.save_artifact(
-            run_id, "result.json", result.model_dump_json(indent=2)
+            run_id, "result.json", json.dumps(result_data, indent=2)
         )

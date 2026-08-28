@@ -20,8 +20,12 @@ class TraceEvent(BaseModel):
     event: str
     tool: str | None = None
     arguments_summary: str | None = None
-    timestamp: str | None = None
+    timestamp: str = ""
     data: dict[str, Any] | None = None
+
+    def model_post_init(self, __context: Any) -> None:  # noqa: ARG002
+        if not self.timestamp:
+            self.timestamp = _now_iso()
 
 
 def _now_iso() -> str:

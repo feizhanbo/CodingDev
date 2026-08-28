@@ -116,7 +116,7 @@ class TestContextBuilderBuild:
         assert "Step 1" in state_msg.content
         assert "Step 3" in state_msg.content
 
-    def test_earlier_observations_noted_as_omitted(
+    def test_earlier_observations_summarized(
         self, registry: ToolRegistry
     ) -> None:
         cb = ContextBuilder(RuntimeConfig(), registry)
@@ -125,9 +125,10 @@ class TestContextBuilderBuild:
         state.total_steps = 14
         messages = cb.build(state, "/workspace")
         state_msg = next(
-            m for m in messages if "omitted" in m.content
+            m for m in messages if "Progress Summary" in m.content
         )
-        assert "4 observations omitted" in state_msg.content
+        assert "4 earlier steps" in state_msg.content
+        assert "Recent Observations" in state_msg.content
 
     def test_modified_files_in_state_message(
         self, registry: ToolRegistry
@@ -149,7 +150,7 @@ class TestContextBuilderBuild:
         state.retry_count = 2
         messages = cb.build(state, "/workspace")
         state_msg = next(
-            m for m in messages if "Test repair retry" in m.content
+            m for m in messages if "Repair attempts" in m.content
         )
         assert "2/3" in state_msg.content
 

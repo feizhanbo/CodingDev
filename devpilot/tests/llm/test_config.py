@@ -9,7 +9,7 @@ from devpilot.llm.config import LLMConfig
 
 class TestLLMConfig:
     def test_default_values(self) -> None:
-        config = LLMConfig()
+        config = LLMConfig(_env_file=None)
         assert config.model == "gpt-4o"
         assert config.api_key == ""
         assert config.max_tokens == 4096

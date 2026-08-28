@@ -47,7 +47,7 @@ constraints:
             return ToolResult(
                 success=False,
                 error=str(exc),
-                data={"path": inp.path},
+                data={"path": inp.path, "modified_files": []},
             )
 
         try:
@@ -56,13 +56,17 @@ constraints:
             return ToolResult(
                 success=False,
                 error=str(exc),
-                data={"path": inp.path},
+                data={"path": inp.path, "modified_files": []},
             )
+
+        # Stage the file so it appears in ``git diff HEAD`` and is
+        # tracked as a modified file by the state manager / verifier.
+        await _git_add(ctx.workspace_root, str(resolved))
 
         rel = _relative(resolved, Path(ctx.workspace_root))
         return ToolResult(
             success=True,
-            data={"path": rel, "error": None},
+            data={"path": rel, "error": None, "modified_files": [rel]},
         )
 
 
@@ -70,6 +74,17 @@ def _write_file(path: Path, content: str) -> None:
     """Create parent dirs and write UTF-8 content (no newline translation)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8", newline="")
+
+
+async def _git_add(workspace_root: str, file_path: str) -> None:
+    """Stage a file so it appears in git diff HEAD."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "add", "--", file_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=workspace_root,
+    )
+    await proc.communicate()
 
 
 def _relative(path: Path, workspace_root: Path) -> str:

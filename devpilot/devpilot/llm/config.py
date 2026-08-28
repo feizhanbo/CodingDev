@@ -10,7 +10,8 @@ class LLMConfig(BaseSettings):
 
     model: str = "gpt-4o"
     api_key: str = ""
+    base_url: str | None = None
     max_tokens: int = 4096
     temperature: float = 0.0
 
-    model_config = SettingsConfigDict(env_prefix="DEVPILOT_", env_file=".env")
+    model_config = SettingsConfigDict(env_prefix="DEVPILOT_", env_file=".env", extra="ignore")

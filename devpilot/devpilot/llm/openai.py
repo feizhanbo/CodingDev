@@ -1,7 +1,8 @@
-"""OpenAI LLM client."""
+"""OpenAI-compatible LLM client."""
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -13,29 +14,49 @@ from devpilot.llm.config import LLMConfig
 
 
 class OpenAIClient(LLMClient):
-    """LLM client backed by the OpenAI API."""
+    """LLM client backed by the OpenAI-compatible API.
+
+    Uses ``json_object`` response format for maximum compatibility
+    (OpenAI, DeepSeek, Azure, local LLMs).  The AgentDecision schema
+    is injected into the system prompt so the model knows the expected
+    JSON structure.
+    """
+
+    # Schema description appended to the first system message
+    _SCHEMA_HINT = (
+        "\n\nYou MUST respond with a JSON object matching this schema:\n"
+        '{"action": {"tool": "string", "arguments": {}}, "finish": '
+        '{"summary": "string", "risk": "low|medium|high"}, '
+        '"plan_update": {"goal": "string", "steps": [{"id": int, '
+        '"description": "string", "status": "pending|running|completed'
+        '|failed|skipped", "verification_hint": "string|null"}], '
+        '"revision": int}}\n\n'
+        "Provide exactly one of: action, finish, or plan_update.\n"
+        "Use tool names with dots (e.g. repo.search_code, code.apply_patch, "
+        "test.run, git.diff, git.status, repo.list_files, repo.read_file, "
+        "code.create_file)."
+    )
 
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
-        self._client = openai.AsyncOpenAI(api_key=config.api_key)
+        kwargs: dict[str, Any] = {"api_key": config.api_key}
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
+        self._client = openai.AsyncOpenAI(**kwargs)
 
     async def chat(
         self, messages: list[LLMMessage], tools: list[dict] | None = None
     ) -> LLMResponse:
         """Send a chat request and return a parsed AgentDecision."""
-        openai_messages: list[dict[str, Any]] = [
-            {"role": msg.role, "content": msg.content} for msg in messages
-        ]
+        # Inject schema hint into the first system message
+        openai_messages: list[dict[str, Any]] = []
+        for i, msg in enumerate(messages):
+            content = msg.content
+            if i == 0 and msg.role == "system":
+                content = content + self._SCHEMA_HINT
+            openai_messages.append({"role": msg.role, "content": content})
 
-        schema = AgentDecision.model_json_schema()
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "agent_decision",
-                "schema": schema,
-                "strict": False,
-            },
-        }
+        response_format: dict[str, Any] = {"type": "json_object"}
 
         kwargs: dict[str, Any] = {
             "model": self._config.model,
@@ -44,15 +65,23 @@ class OpenAIClient(LLMClient):
             "max_tokens": self._config.max_tokens,
             "temperature": self._config.temperature,
         }
+        # Include tool descriptions in the prompt instead of as function
+        # calling parameters for maximum provider compatibility.
         if tools:
-            kwargs["tools"] = tools
+            tools_desc = json.dumps(tools, indent=2, ensure_ascii=False)
+            kwargs["messages"].append(
+                {
+                    "role": "system",
+                    "content": f"Available tools:\n{tools_desc}",
+                }
+            )
 
         start = time.monotonic()
         completion = await self._client.chat.completions.create(**kwargs)
         latency_ms = int((time.monotonic() - start) * 1000)
 
         raw_content = completion.choices[0].message.content or "{}"
-        decision = AgentDecision.model_validate_json(raw_content)
+        decision = self._parse_decision(raw_content)
 
         tokens_used: int | None = None
         if completion.usage is not None:
@@ -65,3 +94,68 @@ class OpenAIClient(LLMClient):
             latency_ms=latency_ms,
             raw_response=raw_content,
         )
+
+    @staticmethod
+    def _parse_decision(raw: str) -> AgentDecision:
+        """Parse AgentDecision from raw LLM output.
+
+        Handles markdown code blocks, extra text, and multi-line JSON.
+        """
+        import logging
+
+        text = raw.strip()
+
+        # Strip markdown code block wrappers
+        if text.startswith("```"):
+            # Remove opening ```json or ```
+            lines = text.split("\n")
+            # Find first line without ```
+            json_lines = []
+            in_block = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    if in_block:
+                        # Closing block - stop
+                        break
+                    else:
+                        # Opening block - skip this line
+                        in_block = True
+                        continue
+                if in_block or not json_lines:
+                    json_lines.append(line)
+            if json_lines:
+                text = "\n".join(json_lines).strip()
+
+        # Try direct parse first
+        try:
+            return AgentDecision.model_validate_json(text)
+        except Exception:
+            pass
+
+        # Try to extract the first JSON object from the text
+        start = text.find("{")
+        if start == -1:
+            logging.error("No JSON object found in LLM response: %s", raw[:500])
+            raise ValueError(f"No JSON object found in LLM response: {raw[:200]}")
+
+        # Find matching closing brace
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+        json_str = text[start:end]
+        try:
+            return AgentDecision.model_validate_json(json_str)
+        except Exception as exc:
+            logging.error(
+                "Failed to parse AgentDecision from: %s", json_str[:500]
+            )
+            raise ValueError(f"Failed to parse AgentDecision: {exc}") from exc

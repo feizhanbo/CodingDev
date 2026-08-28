@@ -37,7 +37,7 @@ constraints:
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
         inp = args  # validated by registry as GitDiffInput
-        cmd = ["git", "diff"]
+        cmd = ["git", "diff", "HEAD"]
         if inp.path:
             guard = PathGuard(ctx.workspace_root)
             try:

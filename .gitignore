@@ -36,11 +36,3 @@ Thumbs.db
 
 # TRAE spec 目录
 .trae/
-
-# 敏感文件（禁止提交）
-test_login_full.py
-check_remote.py
-test_conn.py
-tunnel2.py
-tunnel3.py
-docs/outdated/

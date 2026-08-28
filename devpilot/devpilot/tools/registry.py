@@ -25,8 +25,17 @@ class ToolRegistry:
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> Tool | None:
-        """Return the tool registered under *name*, or ``None``."""
-        return self._tools.get(name)
+        """Return the tool registered under *name*, or ``None``.
+
+        Accepts both dot-separated (``repo.list_files``) and
+        underscore-separated (``repo_list_files``) names.
+        """
+        tool = self._tools.get(name)
+        if tool is not None:
+            return tool
+        # Try converting underscores to dots (LLM may use safe names)
+        alt_name = name.replace("_", ".", 1) if "_" in name else name
+        return self._tools.get(alt_name)
 
     async def execute(self, action: ToolAction, ctx: ToolContext) -> ToolResult:
         """Validate *action*, dispatch to the target tool, handle errors.

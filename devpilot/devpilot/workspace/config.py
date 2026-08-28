@@ -11,4 +11,4 @@ class WorkspaceConfig(BaseSettings):
     runs_root: str = "./runs"
     base_repo: str = "../shopflow-order-service"
 
-    model_config = SettingsConfigDict(env_prefix="DEVPILOT_", env_file=".env")
+    model_config = SettingsConfigDict(env_prefix="DEVPILOT_", env_file=".env", extra="ignore")

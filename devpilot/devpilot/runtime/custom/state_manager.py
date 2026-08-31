@@ -11,7 +11,7 @@ from devpilot.tools.context import ToolResult
 
 _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "understanding": {"exploring", "completed", "failed"},
-    "exploring": {"planning", "exploring", "completed", "failed"},
+    "exploring": {"planning", "implementing", "exploring", "completed", "failed"},
     "planning": {"implementing", "completed", "failed"},
     "implementing": {"verifying", "completed", "failed"},
     "verifying": {"completed", "implementing", "planning", "failed"},

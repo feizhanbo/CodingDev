@@ -7,6 +7,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from devpilot.agents.developer import DeveloperAgent
@@ -22,8 +23,10 @@ from devpilot.runtime.custom.loop_guard import (
     MaxRetriesExceeded,
 )
 from devpilot.runtime.custom.state_manager import StateManager
-from devpilot.tools.context import ToolContext
+from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.registry import ToolRegistry
+from devpilot.tools.repo.file_cache import ReadFileCache
+from devpilot.tools.test.failure_parser import parse_test_failures
 from devpilot.tracing import MetricsCollector, TraceWriter
 from devpilot.verification import TaskVerifier
 from devpilot.workspace.sandbox import SandboxWorkspace
@@ -45,6 +48,7 @@ class CustomAgentRunner:
         verifier: TaskVerifier | None = None,
         trace_writer: TraceWriter | None = None,
         metrics: MetricsCollector | None = None,
+        file_cache: ReadFileCache | None = None,
     ) -> None:
         self.agent = agent
         self.registry = registry
@@ -57,6 +61,7 @@ class CustomAgentRunner:
         self.verifier = verifier
         self.trace_writer = trace_writer
         self.metrics = metrics or MetricsCollector()
+        self.file_cache = file_cache or ReadFileCache()
 
     def _emit(self, event_type: str, data: dict) -> None:
         """Emit a progress event to the optional callback."""
@@ -78,6 +83,37 @@ class CustomAgentRunner:
             self.trace_writer.write_event(
                 run_id, step, phase, event, tool, arguments_summary, data
             )
+
+    @staticmethod
+    def _enrich_test_failure(tool_result: ToolResult) -> None:
+        """Attach structured ``test_failure`` data to a failed test.run result.
+
+        Reads the full pytest output saved to ``test-output.log`` (always
+        written by the test.run tool) and parses it into structured data so
+        the agent can act on concrete failure details instead of raw text.
+        Never raises: on any problem the data is left with a minimal failure
+        entry so downstream context building still works.
+        """
+        if not tool_result.data:
+            return
+        output = ""
+        log_file = tool_result.data.get("log_file")
+        if log_file:
+            try:
+                output = Path(log_file).read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                output = ""
+        try:
+            tool_result.data["test_failure"] = parse_test_failures(output)
+        except Exception:  # noqa: BLE001 - parser must never break the run
+            tool_result.data["test_failure"] = {
+                "kind": "test_failure",
+                "failed_tests": [],
+                "errors": [],
+                "summary": "Failed to parse test output",
+            }
 
     async def run(self, task: DevelopmentTask) -> AgentRunResult:
         """Execute the agent loop for a development task."""
@@ -134,6 +170,19 @@ class CustomAgentRunner:
                     "agent_decision",
                     data={"decision_type": decision_type},
                 )
+
+                # Check for plan_update loop (soft warning + hard stop).
+                # The call mutates guard state and may raise GuardrailViolation,
+                # which is handled by the existing except block below.
+                plan_update_feedback = self.loop_guard.check_plan_update_loop(
+                    decision, state.phase, state.repair_required
+                )
+                if plan_update_feedback:
+                    self._trace(
+                        run_id, state.total_steps, state.phase,
+                        "guardrail_triggered",
+                        data=plan_update_feedback,
+                    )
 
                 # CHECK FOR FINISH
                 if decision.finish:
@@ -301,12 +350,74 @@ class CustomAgentRunner:
                         workspace_root=workspace_path, run_id=run_id
                     )
                     tool_start = time.time()
-                    tool_result = await self.registry.execute(
-                        decision.action, ctx
+
+                    # Check read_file cache before executing the tool
+                    tool_name = decision.action.tool
+                    is_read_file = tool_name in (
+                        "repo.read_file", "repo_read_file",
                     )
+                    cached_result = None
+                    if is_read_file:
+                        rel_path = decision.action.arguments.get(
+                            "path", ""
+                        )
+                        full_path = str(
+                            Path(workspace_path) / rel_path
+                        )
+                        cached_result = self.file_cache.get(
+                            full_path,
+                            decision.action.arguments.get(
+                                "start_line"
+                            ),
+                            decision.action.arguments.get("end_line"),
+                        )
+
+                    if cached_result is not None:
+                        tool_result = cached_result
+                    else:
+                        tool_result = await self.registry.execute(
+                            decision.action, ctx
+                        )
+                        if is_read_file and tool_result.success:
+                            self.file_cache.put(
+                                full_path,
+                                decision.action.arguments.get(
+                                    "start_line"
+                                ),
+                                decision.action.arguments.get(
+                                    "end_line"
+                                ),
+                                tool_result,
+                            )
+
                     tool_duration = int(
                         (time.time() - tool_start) * 1000
                     )
+
+                    # Invalidate read_file cache for files modified by
+                    # patch/create so subsequent reads get fresh content.
+                    if (
+                        tool_result.success
+                        and tool_result.data
+                        and tool_name in (
+                            "code.apply_patch", "code_apply_patch",
+                            "code.create_file", "code_create_file",
+                        )
+                    ):
+                        for f in tool_result.data.get(
+                            "modified_files", []
+                        ):
+                            self.file_cache.invalidate(
+                                str(Path(workspace_path) / f)
+                            )
+
+                    # Enrich failed test.run output with structured failure
+                    # data before the observation is recorded.
+                    if (
+                        decision.action.tool == "test.run"
+                        and not tool_result.success
+                    ):
+                        self._enrich_test_failure(tool_result)
 
                     self.state_manager.apply_tool_result(
                         state, tool_result, decision.action.tool,
@@ -352,6 +463,7 @@ class CustomAgentRunner:
                     ):
                         self.metrics.record_test_retry()
                         self.state_manager.increment_retry(state)
+                        state.repair_required = True
                         try:
                             self.loop_guard.check_test_retries(state)
                         except MaxRetriesExceeded:
@@ -374,6 +486,12 @@ class CustomAgentRunner:
                                 data={"reason": "max_retries"},
                             )
                             return result
+                    elif (
+                        decision.action.tool == "test.run"
+                        and tool_result.success
+                    ):
+                        state.repair_required = False
+                        self.loop_guard.reset_repair_state()
 
                 # Handle plan update
                 if decision.plan_update:
@@ -401,6 +519,28 @@ class CustomAgentRunner:
                         )
                         self.state_manager.add_observation(state, obs)
                         self._maybe_advance_phase(state, decision)
+
+                # Inject runtime feedback as the last observation so the
+                # ContextBuilder surfaces it as RUNTIME FEEDBACK on the next
+                # iteration. Placed after plan_update handling so the feedback
+                # is observations[-1] (highest recency / not buried).
+                if plan_update_feedback:
+                    feedback_obs = Observation(
+                        step_id=state.total_steps + 1,
+                        source="runtime",
+                        name="guardrail_feedback",
+                        success=False,
+                        summary=plan_update_feedback.get(
+                            "message",
+                            plan_update_feedback.get(
+                                "reason", "Guard feedback"
+                            ),
+                        ),
+                        data=plan_update_feedback,
+                    )
+                    self.state_manager.add_observation(
+                        state, feedback_obs
+                    )
 
             # Exceeded max steps
             self.state_manager.transition_phase(state, "failed")

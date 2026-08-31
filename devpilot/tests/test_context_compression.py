@@ -294,8 +294,8 @@ class TestContextCompression:
         messages = cb.build(state, "/workspace")
         state_msg = next(m for m in messages if "Current Phase" in m.content)
 
-        assert "10 earlier steps" in state_msg.content
-        assert "last 5" in state_msg.content
+        assert "7 earlier steps" in state_msg.content
+        assert "last 8" in state_msg.content
 
     def test_compression_preserves_task(
         self, registry: ToolRegistry

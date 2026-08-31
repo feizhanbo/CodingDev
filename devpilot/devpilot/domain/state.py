@@ -51,3 +51,4 @@ class DevPilotState(BaseModel):
     total_steps: int = 0
     retry_count: int = 0
     completion_requested: bool = False
+    repair_required: bool = False

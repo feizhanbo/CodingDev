@@ -10,6 +10,7 @@ from devpilot.llm import build_system_prompt, tools_to_openai_format
 from devpilot.llm.base import LLMMessage
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.tools.registry import ToolRegistry
+from devpilot.tracing import TraceWriter
 
 _PHASE_INSTRUCTIONS: dict[str, str] = {
     "understanding": (
@@ -52,9 +53,15 @@ _PHASE_INSTRUCTIONS: dict[str, str] = {
 class ContextBuilder:
     """Builds the LLM message context from current agent state."""
 
-    def __init__(self, config: RuntimeConfig, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        registry: ToolRegistry,
+        trace_writer: TraceWriter | None = None,
+    ) -> None:
         self.config = config
         self.registry = registry
+        self.trace_writer = trace_writer
         self.max_recent_observations = 10
         self.max_context_chars = 30000
 
@@ -93,7 +100,9 @@ class ContextBuilder:
 
         # 6. Check context size and compress if needed
         total_chars = sum(len(m.content) for m in messages)
-        if total_chars > self.max_context_chars:
+        if total_chars > self.max_context_chars or len(
+            state.observations
+        ) > 20:
             messages = self._compress_context(messages, state)
 
         return messages
@@ -128,6 +137,44 @@ class ContextBuilder:
                         f"      Verification: {step.verification_hint}\n"
                     )
 
+        # Runtime Feedback (highest priority after plan)
+        if (
+            state.observations
+            and state.observations[-1].name == "guardrail_feedback"
+        ):
+            last_feedback = state.observations[-1]
+            content += "\n--- RUNTIME FEEDBACK ---\n"
+            data = last_feedback.data or {}
+            content += f"Reason: {data.get('reason', 'unknown')}\n"
+            content += f"Count: {data.get('count', 0)}\n"
+            content += f"Phase: {data.get('phase', state.phase)}\n"
+            content += (
+                "Required: "
+                f"{data.get('required_next_behavior', 'take_concrete_action')}\n"
+            )
+            if data.get("message"):
+                content += f"Message: {data['message']}\n"
+
+        # CURRENT TEST FAILURE (most recent failed test.run with structured
+        # failure data; supersedes the generic repair block below).
+        emitted_test_failure = False
+        for obs in reversed(state.observations):
+            if obs.name == "test.run" and not obs.success and obs.data:
+                failure = obs.data.get("test_failure")
+                if failure:
+                    content += self._format_test_failure_block(failure)
+                    emitted_test_failure = True
+                break
+
+        # Repair requirement (when tests fail and need fixing)
+        if state.repair_required and not emitted_test_failure:
+            content += (
+                "\n--- REPAIR REQUIREMENT ---\n"
+                "The current implementation is not complete. "
+                "Inspect the error and make a concrete correction "
+                "before requesting finish.\n"
+            )
+
         # Observations: recent full, older compressed
         recent = state.observations[-self.max_recent_observations:]
         older = state.observations[: -self.max_recent_observations]
@@ -137,6 +184,9 @@ class ContextBuilder:
                 f"\n--- Progress Summary ({len(older)} earlier steps) ---\n"
             )
             content += self._summarize_observations(older)
+            structured = self._build_progress_summary(older)
+            if structured:
+                content += structured
 
         if recent:
             content += (
@@ -178,6 +228,103 @@ class ContextBuilder:
             lines.append(
                 f"  {status} Step {obs.step_id}: {obs.name} - {summary}"
             )
+        return "\n".join(lines) + "\n"
+
+    def _build_progress_summary(
+        self, observations: list[Observation]
+    ) -> str:
+        """Build a structured progress summary from older observations.
+
+        Extracts explored files, modified files, test results, and
+        previous failures so the agent has a concise overview of what
+        it has already done without re-reading every observation.
+        """
+        explored: list[str] = []
+        modified: list[str] = []
+        tests_run: list[str] = []
+        failures: list[str] = []
+
+        for obs in observations:
+            data = obs.data or {}
+            name = obs.name
+
+            if name in ("repo.read_file", "repo_read_file"):
+                path = data.get("path", "")
+                if path and path not in explored:
+                    explored.append(path)
+
+            elif name in ("repo.search_code", "repo_search_code"):
+                for m in data.get("matches", []):
+                    p = m.get("path", "")
+                    if p and p not in explored:
+                        explored.append(p)
+
+            elif name in ("repo.list_files", "repo_list_files"):
+                for e in data.get("entries", []):
+                    if e.get("type") == "file":
+                        p = e.get("path", "")
+                        if p and p not in explored:
+                            explored.append(p)
+
+            elif name in ("code.apply_patch", "code_apply_patch"):
+                for f in data.get("modified_files", []):
+                    if f not in modified:
+                        modified.append(f)
+
+            elif name in ("code.create_file", "code_create_file"):
+                p = data.get("path", "")
+                if p and p not in modified:
+                    modified.append(p)
+                for f in data.get("modified_files", []):
+                    if f not in modified:
+                        modified.append(f)
+
+            elif name in ("test.run", "test_run"):
+                passed = data.get("passed", 0)
+                failed = data.get("failed", 0)
+                status = "passed" if obs.success else "failed"
+                tests_run.append(
+                    f"  - {name} ({status}, {passed} passed,"
+                    f" {failed} failed)"
+                )
+
+            if not obs.success:
+                error = obs.summary or data.get("error", "")
+                if error:
+                    failures.append(
+                        f"  - {self._truncate(error, 150)}"
+                    )
+
+        if not (
+            explored or modified or tests_run or failures
+        ):
+            return ""
+
+        lines = ["Progress Summary:"]
+
+        if explored:
+            lines.append("Explored:")
+            for p in explored[:15]:
+                lines.append(f"  - {p}")
+            if len(explored) > 15:
+                lines.append(
+                    f"  ... (+{len(explored) - 15} more)"
+                )
+
+        if modified:
+            lines.append("Modified:")
+            for f in modified:
+                lines.append(f"  - {f}")
+
+        if tests_run:
+            lines.append("Tests run:")
+            lines.extend(tests_run)
+
+        if failures:
+            lines.append("Previous failures:")
+            for f in failures[:10]:
+                lines.append(f)
+
         return "\n".join(lines) + "\n"
 
     def _format_observation_data(self, obs: Observation) -> str:
@@ -255,6 +402,34 @@ class ContextBuilder:
         # Generic fallback: JSON dump truncated
         return self._truncate(json.dumps(data, ensure_ascii=False, default=str), max_len)
 
+    def _format_test_failure_block(self, failure: dict) -> str:
+        """Format structured test failure data as a concise context block."""
+        lines = ["\n--- CURRENT TEST FAILURE ---"]
+        failed_tests = failure.get("failed_tests") or []
+        if failed_tests:
+            lines.append("Failed tests:")
+            for name in failed_tests[:10]:
+                lines.append(f"  - {name}")
+        errors = failure.get("errors") or []
+        for err in errors[:5]:
+            etype = err.get("type", "Unknown")
+            message = err.get("message", "")
+            lines.append(f"Error: {etype}: {message}")
+            locs = err.get("locations") or []
+            if locs:
+                lines.append("Relevant files:")
+                for loc in locs:
+                    lines.append(f"  - {loc}")
+        summary = failure.get("summary", "")
+        if summary:
+            lines.append(f"Summary: {summary}")
+        lines.append(
+            "Repair requirement: The current implementation is not "
+            "complete. Inspect the error and make a concrete correction "
+            "before requesting finish."
+        )
+        return self._truncate("\n".join(lines) + "\n", 1500)
+
     def _truncate(self, text: str, max_len: int) -> str:
         """Truncate text to max_len, adding ... if truncated."""
         if len(text) <= max_len:
@@ -264,14 +439,27 @@ class ContextBuilder:
     def _compress_context(
         self, messages: list[LLMMessage], state: DevPilotState
     ) -> list[LLMMessage]:
-        """Compress context if it exceeds budget."""
+        """Compress context if it exceeds budget or observation count."""
         old_max = self.max_recent_observations
-        self.max_recent_observations = max(3, old_max // 2)
+        self.max_recent_observations = max(8, old_max // 2)
         state_content = self._build_state_content(state)
         for i, msg in enumerate(messages):
             if msg.content.startswith("Current Phase:"):
                 messages[i] = LLMMessage(role="user", content=state_content)
                 break
+        if self.trace_writer:
+            self.trace_writer.write_event(
+                state.run_id,
+                state.total_steps,
+                state.phase,
+                "context_compacted",
+                data={
+                    "observation_count": len(state.observations),
+                    "max_recent_observations": (
+                        self.max_recent_observations
+                    ),
+                },
+            )
         self.max_recent_observations = old_max
         return messages
 

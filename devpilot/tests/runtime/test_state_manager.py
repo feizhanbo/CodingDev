@@ -88,7 +88,6 @@ class TestStateManagerTransitions:
         [
             ("understanding", "planning"),
             ("understanding", "implementing"),
-            ("exploring", "implementing"),
             ("planning", "exploring"),
             ("implementing", "planning"),
             ("completed", "exploring"),

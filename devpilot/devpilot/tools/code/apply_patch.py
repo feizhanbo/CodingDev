@@ -294,7 +294,7 @@ async def _python_apply(
                         best_ratio = ratio
                         best_pos = start
 
-            if best_pos >= 0 and best_ratio > 0.3:
+            if best_pos >= 0 and best_ratio > 0.6:
                 # Replace old lines with new lines
                 result_lines[best_pos:best_pos + len(old_lines)] = new_lines
 

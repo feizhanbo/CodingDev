@@ -157,3 +157,14 @@ class TestReadFile:
             _ctx(str(git_repo)),
         )
         assert not result.success
+
+    async def test_nonexistent_file_returns_error(
+        self, git_repo: Path
+    ) -> None:
+        tool = ReadFile()
+        result = await tool.execute(
+            ReadFile.input_model(path="does_not_exist.py"),
+            _ctx(str(git_repo)),
+        )
+        assert not result.success
+        assert "not a file" in (result.error or "").lower()

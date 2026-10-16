@@ -1,0 +1,13 @@
+id: DEV-003
+title: Fix order pagination edge case
+description: Order pagination must reject negative skip/limit with HTTP 400. Keep
+  already-working out-of-range skip and limit=0 behavior returning an empty list.
+acceptance_criteria:
+- skip 超过总数时返回空列表（200）
+- limit=0 时返回空列表
+- 负数 skip/limit 返回 400
+- 现有正常分页行为不变
+constraints:
+- API response schema 不变
+metadata:
+  dataset_version: v1.1

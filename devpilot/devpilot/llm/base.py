@@ -27,8 +27,23 @@ class LLMResponse(BaseModel):
     raw_response: str | None = None
 
 
+class LLMRequestRecord(BaseModel):
+    """One transport attempt; unknown usage stays unknown."""
+
+    request_id: str
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    latency_ms: int = 0
+    status: Literal["success", "api_error", "parse_error"] = "api_error"
+    error_type: str | None = None
+
+
 class LLMClient(ABC):
     """Abstract base class for LLM clients."""
+
+    last_request: LLMRequestRecord | None = None
 
     @abstractmethod
     async def chat(

@@ -20,7 +20,8 @@ def _write(path: Path, content: str) -> None:
 
 def _git(repo: Path, *args: str) -> str:
     r = subprocess.run(
-        ["git", *args], cwd=str(repo), capture_output=True, text=True
+        ["git", *args], cwd=str(repo), capture_output=True,
+        text=True, encoding="utf-8", errors="replace"
     )
     assert r.returncode == 0, f"git {args} failed: {r.stderr}"
     return r.stdout

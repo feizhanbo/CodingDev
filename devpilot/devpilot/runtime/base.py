@@ -13,3 +13,14 @@ class RuntimeConfig:
 
     max_steps: int = 30
     max_test_retries: int = 3
+    max_modified_files: int = 10
+    max_patch_failures: int = 3
+    test_timeout_seconds: int = 120
+
+    def __post_init__(self) -> None:
+        for name in ("max_steps", "max_modified_files", "max_patch_failures",
+                     "test_timeout_seconds"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.max_test_retries < 0:
+            raise ValueError("max_test_retries must be non-negative")

@@ -33,7 +33,7 @@ from devpilot.tools.registry import ToolRegistry
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SHOPFLOW_ROOT = _PROJECT_ROOT.parent / "shopflow-order-service"
-_ISSUE_PATH = _PROJECT_ROOT / "evals" / "issues" / "DEV-001.yaml"
+_ISSUE_PATH = _PROJECT_ROOT / "devpilot" / "evals" / "issues" / "DEV-001.yaml"
 
 _EXPECTED_TOOLS = {
     "repo.list_files",
@@ -65,7 +65,10 @@ def _write(path: Path, content: str) -> None:
 def _setup_baseline(base: Path) -> None:
     base.mkdir(parents=True, exist_ok=True)
     _write(base / "app.py", "x = 1\nz = 3\n")
-    _write(base / "test_pass.py", "def test_ok():\n    assert True\n")
+    _write(
+        base / "test_pass.py",
+        "from app import x, z\n\ndef test_ok():\n    assert (x, z) == (1, 3)\n",
+    )
 
 
 _PATCH = (
@@ -100,6 +103,21 @@ def _make_responses() -> list[LLMResponse]:
             decision=AgentDecision(
                 action=ToolAction(
                     tool="code.apply_patch", arguments={"patch": _PATCH}
+                )
+            ),
+            model="fake",
+        ),
+        LLMResponse(
+            decision=AgentDecision(
+                action=ToolAction(
+                    tool="code.create_file",
+                    arguments={
+                        "path": "tests/test_added_value.py",
+                        "content": (
+                            "from app import y\n\ndef test_added_value():\n"
+                            "    assert y == 2\n"
+                        ),
+                    },
                 )
             ),
             model="fake",
@@ -353,7 +371,7 @@ class TestV1DefinitionOfDone:
         hidden_dir = tmp_path / "hidden_tests" / "DEV-001"
         _write(
             hidden_dir / "test_secret.py",
-            "def test_secret():\n    assert True\n",
+            "from app import y\n\ndef test_secret():\n    assert y == 2\n",
         )
 
         monkeypatch.setenv(
@@ -389,11 +407,11 @@ class TestV1DefinitionOfDone:
         assert not tool_result.success
 
         # Verify eval runner can execute hidden tests
-        from evals.runner import EvalRunner
+        from devpilot.evals.runner import EvalRunner
 
         eval_runner = EvalRunner(
             base_repo_path=str(baseline),
-            issues_dir=str(_PROJECT_ROOT / "evals" / "issues"),
+            issues_dir=str(_PROJECT_ROOT / "devpilot" / "evals" / "issues"),
             hidden_tests_dir=str(tmp_path / "hidden_tests"),
         )
         hidden_result = eval_runner._run_hidden_tests(

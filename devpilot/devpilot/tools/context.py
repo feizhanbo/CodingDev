@@ -17,6 +17,10 @@ class ToolContext(BaseModel):
 
     workspace_root: str
     run_id: str
+    trusted_root: str | None = None
+    artifacts_dir: str | None = None
+    test_python: str | None = None
+    test_timeout_seconds: int | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 

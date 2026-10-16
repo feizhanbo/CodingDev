@@ -101,10 +101,10 @@ cd devpilot
 
 # 真实 LLM（需配置 API Key）
 cp .env.example .env           # 编辑填入你的 API Key / 模型 / endpoint
-uv run python -m devpilot.cli run evals/issues/DEV-001.yaml
+uv run python -m devpilot.cli run devpilot/evals/issues/DEV-001.yaml
 
 # 使用 FakeLLMClient（无需 API Key，用于确定性测试与 Runtime 联调）
-uv run python -m devpilot.cli run evals/issues/DEV-001.yaml --fake
+uv run python -m devpilot.cli run devpilot/evals/issues/DEV-001.yaml --fake
 ```
 
 ### 批量评估

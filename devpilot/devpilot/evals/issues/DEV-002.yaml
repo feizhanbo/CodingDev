@@ -1,0 +1,15 @@
+id: DEV-002
+title: Prevent invalid order cancellation
+description: In this task-specific starting point, cancel_order lacks a status guard.
+  Reject shipped/completed cancellation with HTTP 409 and preserve legitimate transitions.
+acceptance_criteria:
+- shipped -> cancelled 返回 HTTP 409
+- completed -> cancelled 返回 HTTP 409
+- pending -> cancelled 保持正常
+- paid -> cancelled 保持正常
+- 必须新增回归测试
+constraints:
+- 不修改 API response schema
+- 不影响现有合法转换
+metadata:
+  dataset_version: v1.1

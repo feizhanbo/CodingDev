@@ -88,12 +88,11 @@ class TestCheckDuplicateAction:
         guard.check_duplicate_action(_make_decision("repo.read_file", {"path": "c"}))
         guard.check_duplicate_action(_make_decision("repo.read_file", {"path": "d"}))
 
-    def test_raises_on_four_consecutive_identical(self) -> None:
+    def test_raises_on_six_consecutive_identical(self) -> None:
         guard = LoopGuard(RuntimeConfig())
         d = _make_decision("repo.read_file", {"path": "app.py"})
-        guard.check_duplicate_action(d)
-        guard.check_duplicate_action(d)
-        guard.check_duplicate_action(d)
+        for _ in range(5):
+            guard.check_duplicate_action(d)
         with pytest.raises(DuplicateActionDetected, match="repo.read_file"):
             guard.check_duplicate_action(d)
 
@@ -149,8 +148,7 @@ class TestInspect:
         state = _make_state(total_steps=0)
         d = _make_decision("repo.read_file", {"path": "x"})
         result = ToolResult(success=True)
-        guard.inspect(state, d, result)
-        guard.inspect(state, d, result)
-        guard.inspect(state, d, result)
+        for _ in range(5):
+            guard.inspect(state, d, result)
         with pytest.raises(DuplicateActionDetected):
             guard.inspect(state, d, result)

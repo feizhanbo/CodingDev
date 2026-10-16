@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import shutil
+import sys
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -12,6 +16,7 @@ from devpilot.domain.task import DevelopmentTask
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.tools.context import ToolContext
 from devpilot.tools.registry import ToolRegistry
+from devpilot.verification.evidence import is_test, materialize_candidate, read_manifest
 
 _FORBIDDEN_FILES = {".env", ".git/config", "id_rsa", "id_ed25519"}
 _MAX_MODIFIED_FILES = 10
@@ -30,6 +35,11 @@ class TaskVerifier:
 
     def __init__(self, config: RuntimeConfig) -> None:
         self.config = config
+        self._snapshots: dict[str, Path] = {}
+        self.last_results: dict[str, dict] = {}
+
+    def bind_snapshot(self, run_id: str, trusted: Path) -> None:
+        self._snapshots[run_id] = trusted
 
     async def verify(
         self,
@@ -39,36 +49,136 @@ class TaskVerifier:
         registry: ToolRegistry,
     ) -> VerificationResult:
         """Run all verification checks and return the aggregated result."""
+        from devpilot.evals.benchmark import run_independent_suite
+
         checks: list[dict[str, Any]] = []
-
-        test_check = await self._check_visible_tests(
-            workspace_path, state.run_id, registry
+        trusted = self._snapshots.get(state.run_id)
+        if trusted is None:
+            return VerificationResult(
+                success=False,
+                checks=[
+                    {
+                        "name": "trusted_baseline",
+                        "passed": False,
+                        "message": "No frozen baseline was registered before the agent run",
+                    }
+                ],
+                failure_reason="Missing trusted baseline",
+            )
+        try:
+            candidate, diff, changed = materialize_candidate(
+                Path(workspace_path),
+                trusted,
+                trusted.parent,
+            )
+        except (OSError, ValueError, PermissionError, RuntimeError) as exc:
+            return VerificationResult(
+                success=False,
+                checks=[
+                    {
+                        "name": "test_integrity",
+                        "passed": False,
+                        "message": str(exc),
+                    }
+                ],
+                failure_reason=str(exc),
+            )
+        # Actual files, including untracked additions and deletions, are authoritative.
+        state.modified_files = changed
+        checks.append(
+            {
+                "name": "test_integrity",
+                "passed": True,
+                "message": "Frozen tests and configuration are intact",
+            }
         )
-        checks.append(test_check)
-
-        diff_check = await self._check_diff_non_empty(
-            workspace_path, state.run_id, registry
+        checks.append(
+            {
+                "name": "diff_non_empty",
+                "passed": bool(diff.strip()),
+                "message": "Git diff is non-empty" if diff.strip() else "Git diff is empty",
+            }
         )
-        checks.append(diff_check)
-
-        forbidden_check = self._check_forbidden_files(state)
-        checks.append(forbidden_check)
-
-        count_check = self._check_modified_file_count(state)
-        checks.append(count_check)
-
-        all_passed = all(c["passed"] for c in checks)
-        failed_checks = [c for c in checks if not c["passed"]]
-        failure_reason = (
-            "; ".join(c["message"] for c in failed_checks)
-            if failed_checks
-            else None
+        checks.append(self._check_forbidden_files(state))
+        checks.append(self._check_modified_file_count(state))
+        manifest = read_manifest(trusted)
+        baseline_tests = candidate.parent / "baseline-tests"
+        new_tests = candidate.parent / "added-tests"
+        baseline_tests.mkdir()
+        new_tests.mkdir()
+        for relative in manifest["protected"]:
+            source = trusted / "baseline" / relative
+            if source.suffix != ".py":
+                continue
+            target = baseline_tests / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            if source.name in {"conftest.py", "__init__.py"}:
+                target = new_tests / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+        additions = [p for p in changed if p not in manifest["files"] and is_test(p)]
+        for relative in additions:
+            target = new_tests / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(candidate / relative, target)
+        test_tool = registry.get("test.run")
+        python = getattr(test_tool, "python_executable", sys.executable)
+        visible = await asyncio.to_thread(
+            run_independent_suite,
+            candidate,
+            baseline_tests,
+            candidate.parent / "visible",
+            python,
+            timeout=self.config.test_timeout_seconds,
+            trusted_fixtures=False,
         )
-
+        checks.append(
+            {
+                "name": "visible_tests",
+                "passed": visible.status == "PASS" and not visible.skipped,
+                "message": visible.reason or f"{visible.passed} passed, {visible.failed} failed",
+                "result": visible.model_dump(),
+            }
+        )
+        added = None
+        if additions:
+            added = await asyncio.to_thread(
+                run_independent_suite,
+                candidate,
+                new_tests,
+                candidate.parent / "added",
+                python,
+                timeout=self.config.test_timeout_seconds,
+                trusted_fixtures=False,
+            )
+            checks.append(
+                {
+                    "name": "added_tests",
+                    "passed": added.status == "PASS" and not added.skipped,
+                    "message": added.reason or f"{added.passed} added tests passed",
+                    "result": added.model_dump(),
+                }
+            )
+        criteria = " ".join(task.acceptance_criteria).lower()
+        if any(term in criteria for term in ("add tests", "新增测试", "新增回归测试")):
+            checks.append(
+                {
+                    "name": "required_new_tests",
+                    "passed": bool(additions),
+                    "message": "New tests supplied" if additions else "Issue requires new tests",
+                }
+            )
+        (trusted.parent / "final.diff").write_text(diff, encoding="utf-8", newline="")
+        self.last_results[state.run_id] = {
+            "visible": visible.model_dump(),
+            "added": added.model_dump() if added else None,
+            "candidate": str(candidate),
+            "modified_files": changed,
+        }
+        failed = [c["message"] for c in checks if not c["passed"]]
         return VerificationResult(
-            success=all_passed,
-            checks=checks,
-            failure_reason=failure_reason,
+            success=not failed, checks=checks, failure_reason="; ".join(failed) if failed else None
         )
 
     async def _check_visible_tests(
@@ -127,14 +237,10 @@ class TaskVerifier:
             "message": "Git diff is empty - no changes made",
         }
 
-    def _check_forbidden_files(
-        self, state: DevPilotState
-    ) -> dict[str, Any]:
+    def _check_forbidden_files(self, state: DevPilotState) -> dict[str, Any]:
         """Check that no forbidden files were modified."""
         modified_forbidden = [
-            f
-            for f in state.modified_files
-            if any(x in f for x in _FORBIDDEN_FILES)
+            f for f in state.modified_files if any(x in f for x in _FORBIDDEN_FILES)
         ]
         if not modified_forbidden:
             return {
@@ -148,19 +254,17 @@ class TaskVerifier:
             "message": f"Forbidden files modified: {modified_forbidden}",
         }
 
-    def _check_modified_file_count(
-        self, state: DevPilotState
-    ) -> dict[str, Any]:
+    def _check_modified_file_count(self, state: DevPilotState) -> dict[str, Any]:
         """Check that modified file count is within the limit."""
         count = len(state.modified_files)
-        if count <= _MAX_MODIFIED_FILES:
+        if count <= self.config.max_modified_files:
             return {
                 "name": "modified_file_count",
                 "passed": True,
-                "message": f"{count} files modified (limit: {_MAX_MODIFIED_FILES})",
+                "message": f"{count} files modified (limit: {self.config.max_modified_files})",
             }
         return {
             "name": "modified_file_count",
             "passed": False,
-            "message": f"{count} files modified exceeds limit of {_MAX_MODIFIED_FILES}",
+            "message": f"{count} files modified exceeds limit of {self.config.max_modified_files}",
         }

@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "dataset_version": "v1.1",
+  "baseline_commit": "1ee0adf0549a807e1b99705c027742c48d634292",
+  "baseline_files": {
+    ".gitignore": "ecf67aaf024f003d52a1b1328681f73a4a9637baf234db057d43f4d636fe5f41",
+    "app/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "app/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "app/api/coupons.py": "2fde623b0f714a24fd10e76f06d550c2052fb8315b9b1256898a41bd396aeb52",
+    "app/api/customers.py": "3685d366b8036b3cbb70a326e3bb2f92418653c9d6c10553ab1f46ac8dd1f551",
+    "app/api/orders.py": "acf5dd0d18903e4931f2996eb47aedd841e06f4408777bc2f44ad8ef056c189b",
+    "app/api/products.py": "318f908a081bd04648be2db8f21ba7af38fb26d34249cf3dcd9346e637ccf2d9",
+    "app/db/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "app/db/database.py": "0a907eb25ee381c535ef47a91850ee0a522371a704e979ae574696b0c6e4fa01",
+    "app/db/seed.py": "959b7936d46980e275222e4919131d4f334d324aff6e09c58e032f0d7bb9afb6",
+    "app/main.py": "5f51a72b266850fa13e24e181e080760b270d1c03cd62865096dd6c78712e22e",
+    "app/models/__init__.py": "e2861bedcc651885f027f825ecc34030b68aec81c09203f4513cbf7688f94596",
+    "app/models/coupon.py": "101b6785f0c0677d1979d08b637886e4439c3ea336e2e7214e916c0a0f089237",
+    "app/models/customer.py": "a2021bb245573e85c896c2cd259e825c594bfa0c4a5846a561abb957342a0cbd",
+    "app/models/order.py": "a9ebc35d028e9d9e1b713478220b9e2cb5ed3f46ffc8c36432f123c657ba91ba",
+    "app/models/order_item.py": "87875b146f485971bd3be6697e0403886b5014eeeab7bb49e3552b8ab07411fe",
+    "app/models/product.py": "3a00a5a8177a99f503b93ee33411aff3f1b91c882b057630724bdd40aa674742",
+    "app/repositories/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "app/repositories/customer_repository.py": "9593c73765590c4f1cf91c193d96621585f56ed8391698f7801bf5a42880f4c0",
+    "app/repositories/order_repository.py": "69940b320e220f7cabc7e733510bc5861aab5eac64606ed624c725ab44bbdc50",
+    "app/repositories/product_repository.py": "c071af86e110265a022a43aaed9cac6b9c53d06bc4d3259ab82d602001c86bbf",
+    "app/schemas/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "app/schemas/coupon.py": "30b35cbb57db63a341ffa2b21bff50c293ec590e8990e3ae077a48188e04eca4",
+    "app/schemas/customer.py": "66b6e9a0394b8ec809cd459756091ff834c376b0e89ea8d4bb17e573c6cdfb7b",
+    "app/schemas/order.py": "ebf045187f296f20e23b04f90230e690fb47ac1c1c853eb798dcc6256cdafd0f",
+    "app/schemas/product.py": "7e7bdab426015ae1225aa205a4e83ec93cf9c014925b0be718ff915c56568fb4",
+    "app/services/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "app/services/order_service.py": "a8400a15117546de831781c45dc8f58f2efedd4a97c0da152c080c5c1188db63",
+    "app/services/pricing_service.py": "2d0f34ea6e9d8fb4fafc276ef8cd25a44da37a98685770986abc2f372c804c74",
+    "pyproject.toml": "ba1223163b955bb13b4556d899f7d585f72de9fafd92447cd496c82a4bedae04",
+    "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/api/test_coupons.py": "7eb35632dd10569b5b825029405eb7b012da12b21cdbf367b10df714ec453e7e",
+    "tests/api/test_customers.py": "9c2b27e0a108861e69f20944c2949449cc3647d5146a50b31ae1ef5648d37264",
+    "tests/api/test_orders.py": "4ddec5553fb50af27b15e81a2e3d75f0580670702a43fc75acaeac02a0848ca7",
+    "tests/api/test_products.py": "9abca4ca6cef64ef05af61e5a908ae023dd613cf41f07b810e00d89bcec3fcfc",
+    "tests/conftest.py": "4db4476677f8680379e92d1db0f7826ac8f5cc9e257fab4bb428f41d4d43b142",
+    "tests/repositories/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/repositories/test_order_repository.py": "a854b636f271875fa749a800b02cad978826b0a710a6afc93ad0feac30615099",
+    "tests/repositories/test_product_repository.py": "015a6e362ace730df579d2028ffc23f8cae25273d299671e8e69494b62a14163",
+    "tests/services/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/services/test_order_service.py": "f097952cbd5b95a785636eeb481d7e10a0241b30c729f3949ee07bc8cc629201",
+    "tests/services/test_pricing_service.py": "68cb80c574ebcab5e463c344c11627d9688e71ee332c17b0da748331fbc49869",
+    "uv.lock": "7683b5938d8769e60b10513fe9ac7af44b8209ca759e072422c2c047964a0bbf"
+  },
+  "issues": {
+    "DEV-001": {
+      "resources": {
+        "hidden_tests/DEV-001/test_hidden_dev001.py": "47c7d330c7ccac3cd5537b2ad86f27fd470cf2cd3f67ab8a10c4f8902bedd8b4",
+        "issues/DEV-001.yaml": "9a7d42c2105786897d572c4479cfd77b349183c1c2b46e8d57d96a8d73b1f959",
+        "shared/conftest.py": "5f3f7f27a3172ee93aa847c48f62367084906401b5d4ea09c2a6f8ac15b9b54f"
+      },
+      "start_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reference_patch_sha256": "9bbb0ee16cfde83a6825eaf57882c7d023755ff2216397a66e2ae75d08b72c9b"
+    },
+    "DEV-002": {
+      "resources": {
+        "hidden_tests/DEV-002/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "hidden_tests/DEV-002/test_hidden_dev002.py": "84c4af406f24a77f0cd4823aa3253e1ac0a11718169f1956a2024693c62df32f",
+        "issues/DEV-002.yaml": "584d7bcaf39a6ad8a9ee68247c1ca70cc08e5811d3890e18b3e72b05b6bf8d52",
+        "shared/conftest.py": "5f3f7f27a3172ee93aa847c48f62367084906401b5d4ea09c2a6f8ac15b9b54f"
+      },
+      "start_patch_sha256": "2af1ea233159b1633a8b6b2bd3e9aafd352fdd30f3e244b4436876be8dff1bbf",
+      "reference_patch_sha256": "f179da7d16d711d7ca060375743bba788539fb370a5e8161f7e0fe3f248ce6e6"
+    },
+    "DEV-003": {
+      "resources": {
+        "hidden_tests/DEV-003/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "hidden_tests/DEV-003/test_hidden_dev003.py": "027121260f5ba5e157356f51584821f88998ebdec143f6f14a75e8e919aced30",
+        "issues/DEV-003.yaml": "8d08694f42d59bee396dcc8274d0df213e28b710a4bd1ba4608a5e65d5b6887b",
+        "shared/conftest.py": "5f3f7f27a3172ee93aa847c48f62367084906401b5d4ea09c2a6f8ac15b9b54f"
+      },
+      "start_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reference_patch_sha256": "0aaf22fea00549699eaee3c024d769673530d7f8f39c7c21e5475225e9ea16b7"
+    },
+    "DEV-004": {
+      "resources": {
+        "hidden_tests/DEV-004/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "hidden_tests/DEV-004/test_hidden_dev004.py": "57029922addeb3b5956afecfaf4125764616e777b7386670d8506b8483f662c4",
+        "issues/DEV-004.yaml": "91f27133373ba763b1ecd3c080f9db69390014cc7ddb2ca09aae573dee502a54",
+        "shared/conftest.py": "5f3f7f27a3172ee93aa847c48f62367084906401b5d4ea09c2a6f8ac15b9b54f"
+      },
+      "start_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reference_patch_sha256": "2db70300238b638a3ecd6c64b4a9e4f396a4cfb36d7c393ca2c0cb5de3c0166d"
+    },
+    "DEV-005": {
+      "resources": {
+        "hidden_tests/DEV-005/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "hidden_tests/DEV-005/test_hidden_dev005.py": "bf588c119f4e7f975310ecc2187b200cbdfa9d2f3b7d41ccb4280d64b36ccaf1",
+        "issues/DEV-005.yaml": "f9bef3abb51abdb43e466a976a1cf84cb671283d3a76e79c00c22953e7828303",
+        "shared/conftest.py": "5f3f7f27a3172ee93aa847c48f62367084906401b5d4ea09c2a6f8ac15b9b54f"
+      },
+      "start_patch_sha256": "c2a5ebbea430a068387509a04a7dd1e30917a64020ab9ba63efab55c2628bce6",
+      "reference_patch_sha256": "7fc70bc01de478811e8fde9519cc77392109d86214653c0ac9ee0acc95463f13"
+    },
+    "DEV-006": {
+      "resources": {
+        "hidden_tests/DEV-006/test_hidden_dev006.py": "f9a378c2211e6008609af960294c40730c0590f83a08e8d48435f871b1314c59",
+        "issues/DEV-006.yaml": "218698886d229e91349aa470efb7931b3c11893f3a6d22c403b95bf0469f796a",
+        "shared/conftest.py": "5f3f7f27a3172ee93aa847c48f62367084906401b5d4ea09c2a6f8ac15b9b54f"
+      },
+      "start_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reference_patch_sha256": "c7841efc541d329caf0e5c622e14424e8888919390aefa1dc28ffcd6550d4673"
+    },
+    "DEV-007": {
+      "resources": {
+        "hidden_tests/DEV-007/test_hidden_dev007.py": "2926f31b97cf680f86d5c18b65ae30daebc23cbf126cc769cb58a35feead9f8c",
+        "issues/DEV-007.yaml": "8c4923f1264a18e6bb91d0afc6befc43c023ddc9adee4e996412ea2feb2d6903",
+        "shared/conftest.py": "5f3f7f27a3172ee93aa847c48f62367084906401b5d4ea09c2a6f8ac15b9b54f"
+      },
+      "start_patch_sha256": "2619c80c811ad5ea30769884af4bb90f957ab9e9df111c2332c92c54a81ea66a",
+      "reference_patch_sha256": "d69077023ebe7de55107404b5d3ea9db76f7774dad717078ad57bc1ff13de5f5"
+    },
+    "DEV-008": {
+      "resources": {
+        "hidden_tests/DEV-008/test_hidden_dev008.py": "f7c87e0afba2494884e2da18e081569e90d108aa8d3661d5d1715715a11e7379",
+        "issues/DEV-008.yaml": "985c1933defc2ef1e64f0381dac03dcbf06879955048999ca46eb88aee0fbd2b",
+        "shared/conftest.py": "5f3f7f27a3172ee93aa847c48f62367084906401b5d4ea09c2a6f8ac15b9b54f"
+      },
+      "start_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "reference_patch_sha256": "66d4180397f3a7eb09c39710f41a520a2aebfcc4af68e8c945c2733ae06bee4b"
+    }
+  }
+}

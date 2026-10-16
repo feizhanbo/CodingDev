@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import NamedTuple
 
 from pydantic import BaseModel
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
+from devpilot.verification.evidence import validate_write
 
 
 class ApplyPatchInput(BaseModel):
@@ -56,6 +58,7 @@ constraints:
         for p in paths:
             try:
                 guard.validate_path(p)
+                validate_write(Path(ctx.workspace_root), p, ctx.trusted_root)
             except PermissionError as exc:
                 return ToolResult(
                     success=False,

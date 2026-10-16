@@ -1,0 +1,18 @@
+--- a/app/services/order_service.py
++++ b/app/services/order_service.py
+@@ -75,10 +75,6 @@
+         order = order_repo.get_by_id(order_id)
+         if not order:
+             raise ValueError(f"Order {order_id} not found")
+-        # Legacy per-item product lookup; this grows with order size.
+-        from app.models.product import Product
+-        for item in order.items:
+-            db.query(Product).filter(Product.id == item.product_id).one()
+         return OrderDetailResponse.model_validate(order)
+ 
+     @staticmethod
+--- /dev/null
++++ b/tests/test_issue_regression.py
+@@ -0,0 +1,2 @@
++def test_missing_order_still_404(client):
++    assert client.get("/orders/999999").status_code == 404

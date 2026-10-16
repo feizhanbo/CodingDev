@@ -9,9 +9,9 @@ import pytest
 from devpilot.domain.result import AgentRunResult
 from devpilot.domain.state import DevPilotState, Observation
 from devpilot.domain.task import DevelopmentTask
+from devpilot.evals.metrics import collect_metrics
+from devpilot.evals.runner import EvalResult, EvalRunner
 from devpilot.runtime.base import RuntimeConfig
-from evals.metrics import collect_metrics
-from evals.runner import EvalResult, EvalRunner
 
 _ISSUE_YAML = """\
 id: DEV-001
@@ -69,7 +69,7 @@ class TestEvalResultModel:
         result = EvalResult(
             issue_id="DEV-001",
             run_id="run_test",
-            task_success=True,
+            task_success=True, evaluation_status="PASS",
             visible_test_pass_rate=1.0,
             hidden_test_pass_rate=1.0,
             avg_steps=4,
@@ -91,14 +91,14 @@ class TestEvalResultModel:
         assert result.runtime_duration_ms == 1000
         assert result.agent_status == "completed"
         assert result.error is None
-        assert result.regression_rate == 0.0
+        assert result.regression_rate is None
         assert result.token_cost is None
 
     def test_model_with_defaults(self) -> None:
         result = EvalResult(
             issue_id="DEV-002",
             run_id="run_test2",
-            task_success=False,
+            task_success=False, evaluation_status="FAIL",
             visible_test_pass_rate=0.0,
             agent_status="failed",
             error="Max retries exceeded",
@@ -116,7 +116,7 @@ class TestEvalResultModel:
         result = EvalResult(
             issue_id="DEV-003",
             run_id="run_abc",
-            task_success=True,
+            task_success=True, evaluation_status="PASS",
             visible_test_pass_rate=0.8,
             hidden_test_pass_rate=0.5,
             avg_steps=10,
@@ -160,7 +160,9 @@ class TestRunEval:
 
         assert result.issue_id == "DEV-001"
         assert result.agent_status == "completed"
-        assert result.task_success is True
+        assert result.task_success is None
+        assert result.evaluation_mode == "smoke"
+        assert result.evaluation_status == "PASS"
         assert result.visible_test_pass_rate == 1.0
         assert result.avg_steps > 0
         assert result.error is None
@@ -193,7 +195,9 @@ class TestRunEval:
         result = await runner.run_eval("DEV-001", fake=True)
 
         assert result.hidden_test_pass_rate is None
-        assert result.task_success is True
+        assert result.task_success is None
+        assert result.evaluation_mode == "smoke"
+        assert result.evaluation_status == "PASS"
 
     async def test_run_eval_with_hidden_tests(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -218,9 +222,10 @@ class TestRunEval:
         )
         result = await runner.run_eval("DEV-001", fake=True)
 
-        assert result.hidden_test_pass_rate is not None
-        assert result.hidden_test_pass_rate == 1.0
-        assert result.task_success is True
+        assert result.hidden_test_pass_rate is None
+        assert result.task_success is None
+        assert result.evaluation_mode == "smoke"
+        assert result.evaluation_status == "PASS"
 
     async def test_run_eval_saves_change_scope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -314,8 +319,7 @@ class TestHiddenTestsIsolation:
         workspace_hidden = (
             tmp_path / "workspaces" / result.run_id / "repo" / "hidden_tests"
         )
-        assert workspace_hidden.is_dir()
-        assert (workspace_hidden / "test_hidden.py").is_file()
+        assert not workspace_hidden.exists()
 
     async def test_hidden_tests_not_accessible_during_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -533,7 +537,7 @@ class TestSummaryGeneration:
             EvalResult(
                 issue_id="DEV-001",
                 run_id="run_1",
-                task_success=True,
+                task_success=True, evaluation_status="PASS",
                 visible_test_pass_rate=1.0,
                 hidden_test_pass_rate=1.0,
                 avg_steps=4,
@@ -544,7 +548,7 @@ class TestSummaryGeneration:
             EvalResult(
                 issue_id="DEV-002",
                 run_id="run_2",
-                task_success=False,
+                task_success=False, evaluation_status="FAIL",
                 visible_test_pass_rate=0.5,
                 hidden_test_pass_rate=None,
                 avg_steps=10,
@@ -558,8 +562,8 @@ class TestSummaryGeneration:
         assert "DEV-001" in summary
         assert "DEV-002" in summary
         assert "Total: 2" in summary
-        assert "Success: 1" in summary
-        assert "Fail: 1" in summary
+        assert "Capability success: 1" in summary
+        assert "FAIL: 1" in summary
 
     def test_generate_comparison_table_empty(self) -> None:
         runner = EvalRunner(base_repo_path=".")
@@ -572,7 +576,7 @@ class TestSummaryGeneration:
             EvalResult(
                 issue_id="DEV-001",
                 run_id="run_1",
-                task_success=True,
+                task_success=True, evaluation_status="PASS",
                 visible_test_pass_rate=1.0,
                 hidden_test_pass_rate=1.0,
                 avg_steps=4,
@@ -583,7 +587,8 @@ class TestSummaryGeneration:
         ]
         table = runner.generate_comparison_table(results)
         assert "DEV-001" in table
-        assert "completed" in table
-        assert "YES" in table
+        assert "capability" in table
+        assert "PASS" in table
+        assert "PASS" in table
         assert "100%" in table
         assert "|" in table

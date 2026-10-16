@@ -37,10 +37,10 @@ uv run python -m app.db.seed  # Initialize sample data
 ```bash
 # With real LLM (requires OPENAI_API_KEY)
 cp .env.example .env  # Edit and add your API key
-uv run python -m devpilot.cli run evals/issues/DEV-001.yaml
+uv run python -m devpilot.cli run devpilot/evals/issues/DEV-001.yaml
 
 # With FakeLLMClient (no API key needed)
-uv run python -m devpilot.cli run evals/issues/DEV-001.yaml --fake
+uv run python -m devpilot.cli run devpilot/evals/issues/DEV-001.yaml --fake
 ```
 
 ### Run Evaluation
@@ -189,3 +189,19 @@ devpilot/
 - V5: Framework Runtime (LangGraph) + durable state
 - V6: Multi-Agent R&D Supervisor
 - V7: SRE Agent
+
+## V1 hardening configuration
+
+Python 3.12 is pinned for development. `run` and `eval` use the same Settings: explicit arguments override environment variables, which override the chosen `.env`, then defaults. Use `--env-file PATH` to select the dotenv file. Existing `DEVPILOT_*` names remain supported.
+
+The target test interpreter must include the target repository dependencies. On Windows, after `uv sync --frozen` in both projects, run from this directory:
+
+```powershell
+uv run devpilot run devpilot/evals/issues/DEV-001.yaml --test-python ../shopflow-order-service/.venv/Scripts/python.exe
+```
+
+On POSIX use `../shopflow-order-service/.venv/bin/python`. The equivalent environment variable is `DEVPILOT_TEST_PYTHON`. Runtime step/retry/file/patch limits and the test timeout are shared by run and eval.
+
+Evaluation code and resources now live in `devpilot.evals` and ship in the wheel. `eval` resolves default issues from package resources; `--issues-dir` and `--hidden-tests-dir` override them. Python callers should import `devpilot.evals.runner`, replacing `evals.runner`. `inspect` and `diff` use `DEVPILOT_RUNS_ROOT`, and diff fallback uses `DEVPILOT_WORKSPACE_ROOT`. Each test invocation gets its own log under the run artifact directory.
+
+Hardening is in progress. The current local subprocess backend does not enforce network isolation; the network setting is not yet an isolation guarantee. Fake evaluation still requires the planned smoke/capability separation and must not be interpreted as Agent capability evidence. See `../docs/v1-hardening-progress.md` for verified work and remaining gates.

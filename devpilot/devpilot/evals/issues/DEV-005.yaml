@@ -1,0 +1,16 @@
+id: DEV-005
+title: Optimize order detail N+1 query
+description: In this task-specific starting point, order detail performs a redundant
+  Product SELECT for every item. Remove the N+1 behavior while preserving all response
+  fields and correctness. Validate with cold sessions and a 1000-item order.
+acceptance_criteria:
+- Cold-session order detail SELECT count is bounded independently of item count (at
+  most 5 SELECTs for 1000 items)
+- GET /orders/{id} 响应时间 < 500ms（1000 items 场景）
+- API response schema 不变
+- 现有行为保持正确
+constraints:
+- 不修改 API response schema
+- 不引入新的依赖
+metadata:
+  dataset_version: v1.1

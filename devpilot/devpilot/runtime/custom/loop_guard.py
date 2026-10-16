@@ -48,6 +48,10 @@ class LoopGuard:
 
     def __init__(self, config: RuntimeConfig) -> None:
         self.config = config
+        self.reset()
+
+    def reset(self) -> None:
+        """Discard guard history before a new independent run."""
         self._recent_tool_calls: list[str] = []
         # Decision-level guard state.
         self.last_decision_type: str | None = None
@@ -55,6 +59,7 @@ class LoopGuard:
         self.consecutive_plan_update_count: int = 0
         self.consecutive_no_action_count: int = 0
         self.last_action_fingerprint: str | None = None
+        self.patch_failures = 0
 
     def check_max_steps(self, state: DevPilotState) -> None:
         """Check if max steps exceeded. Raise MaxStepsExceeded if so."""
@@ -174,9 +179,9 @@ class LoopGuard:
 
     def check_modified_files(self, state: DevPilotState) -> None:
         """Check if max modified files exceeded."""
-        if len(state.modified_files) > MAX_MODIFIED_FILES:
+        if len(state.modified_files) > self.config.max_modified_files:
             raise MaxModifiedFilesExceeded(
-                f"Exceeded max_modified_files={MAX_MODIFIED_FILES}"
+                f"Exceeded max_modified_files={self.config.max_modified_files}"
             )
 
     def inspect(
@@ -186,3 +191,9 @@ class LoopGuard:
         self.check_max_steps(state)
         self.check_duplicate_action(decision)
         self.check_modified_files(state)
+        if decision.action and decision.action.tool == "code.apply_patch" and not result.success:
+            self.patch_failures += 1
+            if self.patch_failures >= self.config.max_patch_failures:
+                raise GuardrailViolation(
+                    f"Exceeded max_patch_failures={self.config.max_patch_failures}"
+                )

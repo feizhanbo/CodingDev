@@ -1,0 +1,14 @@
+id: DEV-006
+title: Email normalization for customers
+description: Normalize Customer.email on construction and reassignment (strip whitespace,
+  lowercase), persisting normalized values through the ORM. The repository only exposes
+  GET /customers/{id}; do not add a customer creation endpoint.
+acceptance_criteria:
+- Email stored in lowercase
+- Leading/trailing whitespace trimmed
+- Existing API behavior unchanged except for normalization
+- Must add tests for normalization
+constraints:
+- Do not change API response schema
+metadata:
+  dataset_version: v1.1

@@ -1,0 +1,26 @@
+--- a/app/models/customer.py
++++ b/app/models/customer.py
+@@ -1,7 +1,7 @@
+ """ShopFlow Order Service - Customer model."""
+ 
+ from sqlalchemy import String
+-from sqlalchemy.orm import Mapped, mapped_column, relationship
++from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
+ 
+ from app.db.database import Base
+ 
+@@ -16,3 +16,7 @@
+     email: Mapped[str] = mapped_column(String(255))
+ 
+     orders: Mapped[list["Order"]] = relationship(back_populates="customer")
++
++    @validates("email")
++    def normalize_email(self, key, value):
++        return value.strip().lower()
+--- /dev/null
++++ b/tests/test_issue_regression.py
+@@ -0,0 +1,4 @@
++from app.models.customer import Customer
++
++def test_normalized_customer():
++    assert Customer(name="test", email=" A@B.COM ").email == "a@b.com"

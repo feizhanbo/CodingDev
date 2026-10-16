@@ -9,6 +9,11 @@ class MetricsCollector:
     """Collects runtime metrics during an agent run."""
 
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Start independent accounting for a new run."""
+        self.llm_requests: list[dict] = []
         self.total_steps: int = 0
         self.tool_calls: int = 0
         self.tool_failures: int = 0
@@ -17,6 +22,12 @@ class MetricsCollector:
         self.start_time: float = 0
         self.tokens_used: int = 0
         self.finish_rejected_count: int = 0
+
+    def record_llm_request(self, record: dict) -> None:
+        """Preserve all attempts, including failures with known billed usage."""
+        self.llm_requests.append(dict(record))
+        if record.get("total_tokens") is not None:
+            self.record_tokens(record["total_tokens"])
 
     def record_tool_call(self, success: bool) -> None:
         """Record a tool call outcome."""
@@ -56,10 +67,20 @@ class MetricsCollector:
         return {
             "total_steps": self.total_steps,
             "tool_calls": self.tool_calls,
+            "tool_failures": self.tool_failures,
             "tool_failure_rate": round(failure_rate, 4),
             "test_retries": self.test_retries,
             "modified_files": len(self.modified_files),
             "duration_ms": duration_ms,
-            "tokens": self.tokens_used,
+            "tokens": (
+                None if any(r.get("total_tokens") is None for r in self.llm_requests)
+                else self.tokens_used
+            ),
+            "known_tokens": self.tokens_used,
+            "llm_requests": len(self.llm_requests),
+            "llm_latency_ms": sum(r["latency_ms"] for r in self.llm_requests),
+            "llm_unknown_usage_requests": sum(
+                r.get("total_tokens") is None for r in self.llm_requests
+            ),
             "finish_rejected_count": self.finish_rejected_count,
         }

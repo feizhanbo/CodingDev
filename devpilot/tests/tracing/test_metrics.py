@@ -117,9 +117,10 @@ class TestToDict:
         m = MetricsCollector()
         d = m.to_dict()
         expected_keys = {
-            "total_steps", "tool_calls", "tool_failure_rate",
+            "total_steps", "tool_calls", "tool_failure_rate", "tool_failures",
             "test_retries", "modified_files", "duration_ms",
             "tokens", "finish_rejected_count",
+            "known_tokens", "llm_requests", "llm_latency_ms", "llm_unknown_usage_requests",
         }
         assert set(d.keys()) == expected_keys
 

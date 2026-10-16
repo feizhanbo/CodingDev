@@ -21,7 +21,8 @@ def _write(path: Path, content: str) -> None:
 
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", *args], cwd=str(repo), capture_output=True, text=True
+        ["git", *args], cwd=str(repo), capture_output=True,
+        text=True, encoding="utf-8", errors="replace"
     )
     assert result.returncode == 0, f"git {args} failed: {result.stderr}"
     return result.stdout
@@ -96,9 +97,12 @@ class TestSandboxToolIntegration:
         assert result.success
         assert "x = 1" in result.data["content"]
 
-        # 8. code.create_file works (modify existing tracked file).
+        # 8. code.apply_patch modifies an existing tracked source file.
         result = await reg.execute(
-            _action("code.create_file", path="app.py", content="x = 100\n"),
+            _action(
+                "code.apply_patch",
+                patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x = 1\n+x = 100\n",
+            ),
             ctx,
         )
         assert result.success

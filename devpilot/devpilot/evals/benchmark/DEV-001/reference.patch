@@ -1,0 +1,56 @@
+--- a/app/api/orders.py
++++ b/app/api/orders.py
+@@ -20,9 +20,13 @@
+ 
+ 
+ @router.get("", response_model=list[OrderResponse])
+-def get_orders(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
++def get_orders(skip: int = 0, limit: int = 20, status: str | None = None,
++               db: Session = Depends(get_db)):
+     """Get all orders with pagination."""
+-    return OrderService.get_orders(db, skip=skip, limit=limit)
++    if status is not None and status not in {"pending", "paid", "shipped",
++                                              "completed", "cancelled"}:
++        raise HTTPException(status_code=400, detail="Invalid status")
++    return OrderService.get_orders(db, skip=skip, limit=limit, status=status)
+ 
+ 
+ @router.get("/{order_id}", response_model=OrderDetailResponse)
+--- a/app/repositories/order_repository.py
++++ b/app/repositories/order_repository.py
+@@ -41,9 +41,12 @@
+             .first()
+         )
+ 
+-    def get_all(self, skip: int = 0, limit: int = 20) -> list[Order]:
++    def get_all(self, skip: int = 0, limit: int = 20, status: str | None = None) -> list[Order]:
+         """Get all orders with pagination."""
+-        return self.db.query(Order).offset(skip).limit(limit).all()
++        query = self.db.query(Order)
++        if status is not None:
++            query = query.filter(Order.status == status)
++        return query.order_by(Order.id).offset(skip).limit(limit).all()
+ 
+     def update_status(self, order_id: int, new_status: str) -> Order | None:
+         """Update the status of an order."""
+--- a/app/services/order_service.py
++++ b/app/services/order_service.py
+@@ -79,11 +79,11 @@
+ 
+     @staticmethod
+     def get_orders(
+-        db: Session, skip: int = 0, limit: int = 20
++        db: Session, skip: int = 0, limit: int = 20, status: str | None = None
+     ) -> list[OrderResponse]:
+         """Get all orders with pagination."""
+         order_repo = OrderRepository(db)
+-        orders = order_repo.get_all(skip=skip, limit=limit)
++        orders = order_repo.get_all(skip=skip, limit=limit, status=status)
+         return [OrderResponse.model_validate(order) for order in orders]
+ 
+     @staticmethod
+--- /dev/null
++++ b/tests/test_issue_regression.py
+@@ -0,0 +1,2 @@
++def test_invalid_status(client):
++    assert client.get("/orders?status=unknown").status_code == 400

@@ -72,5 +72,5 @@ class TestDeveloperAgentDecide:
         tool_names = [
             t["function"]["name"] for t in spy.received_tools
         ]
-        assert "repo.read_file" in tool_names
-        assert "code.apply_patch" in tool_names
+        assert "repo_read_file" in tool_names
+        assert "code_apply_patch" in tool_names

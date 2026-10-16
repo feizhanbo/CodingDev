@@ -1,0 +1,16 @@
+--- a/app/api/orders.py
++++ b/app/api/orders.py
+@@ -22,6 +22,8 @@
+ @router.get("", response_model=list[OrderResponse])
+ def get_orders(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
+     """Get all orders with pagination."""
++    if skip < 0 or limit < 0:
++        raise HTTPException(status_code=400, detail="Negative pagination")
+     return OrderService.get_orders(db, skip=skip, limit=limit)
+ 
+ 
+--- /dev/null
++++ b/tests/test_issue_regression.py
+@@ -0,0 +1,2 @@
++def test_negative_limit(client):
++    assert client.get("/orders?limit=-7").status_code == 400

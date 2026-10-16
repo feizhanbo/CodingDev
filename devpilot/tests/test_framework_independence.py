@@ -40,7 +40,7 @@ def _import_and_check_runtime(import_stmt: str) -> set[str]:
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         cwd=str(PROJECT_ROOT),
     )
     if result.returncode != 0:
@@ -148,7 +148,7 @@ class TestEvalRunnerIndependence:
     )
     def test_eval_runner_no_custom_runtime(self) -> None:
         runtime_mods = _import_and_check_runtime(
-            "from evals.runner import EvalRunner"
+            "from devpilot.evals.runner import EvalRunner"
         )
         custom_mods = {m for m in runtime_mods if "custom" in m}
         assert not custom_mods, (

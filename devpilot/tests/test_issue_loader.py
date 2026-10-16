@@ -11,7 +11,7 @@ from devpilot.domain.task import DevelopmentTask
 
 _ISSUE_PATH = (
     Path(__file__).resolve().parent.parent
-    / "evals"
+    / "devpilot" / "evals"
     / "issues"
     / "DEV-001.yaml"
 )

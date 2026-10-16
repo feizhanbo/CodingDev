@@ -46,7 +46,7 @@ def _make_baseline(tmp_path: Path) -> Path:
 
 def _make_hidden_tests(tmp_path: Path) -> Path:
     """Create hidden tests *outside* the baseline repo."""
-    hidden_root = tmp_path / "evals" / "hidden_tests"
+    hidden_root = tmp_path / "devpilot" / "evals" / "hidden_tests"
     hidden_dir = hidden_root / "DEV-001"
     _write(
         hidden_dir / "test_hidden_dev001.py",
@@ -54,7 +54,8 @@ def _make_hidden_tests(tmp_path: Path) -> Path:
         "from __future__ import annotations\n\n\n"
         f"def {HIDDEN_FUNC}():\n"
         f"    # {HIDDEN_MARKER}\n"
-        "    assert True\n",
+        "    from app import x\n"
+        "    assert x == 1\n",
     )
     return hidden_root
 
@@ -383,7 +384,7 @@ class TestHiddenTestIsolation:
         workspace *after* the agent run completes, then executed.
         """
         ws = isolated_workspace
-        from evals.runner import EvalRunner
+        from devpilot.evals.runner import EvalRunner
 
         runner = EvalRunner(
             base_repo_path=str(ws.baseline),
@@ -395,13 +396,10 @@ class TestHiddenTestIsolation:
         assert result["passed"] is True
         assert result["pass_rate"] == 1.0
 
-        # Hidden tests were copied into the workspace AFTER the run
+        # Evaluator can execute the hidden suite, but never injects it into the Agent repo.
         workspace_hidden = Path(ws.repo_path) / "hidden_tests"
-        assert (workspace_hidden / "test_hidden_dev001.py").is_file()
-
-        # The copied file now contains the marker (expected -- this
-        # happened after the agent finished, not during the run)
-        copied_content = (
-            workspace_hidden / "test_hidden_dev001.py"
-        ).read_text(encoding="utf-8")
-        assert HIDDEN_MARKER in copied_content
+        assert not workspace_hidden.exists()
+        report = Path(result["report_file"])
+        assert not report.is_relative_to(Path(ws.repo_path))
+        copied = report.parent / "tests" / "test_hidden_dev001.py"
+        assert HIDDEN_MARKER in copied.read_text(encoding="utf-8")

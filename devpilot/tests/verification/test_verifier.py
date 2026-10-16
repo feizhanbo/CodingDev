@@ -13,6 +13,7 @@ from devpilot.tools.git import GitDiff, GitStatus
 from devpilot.tools.repo import ListFiles, ReadFile, SearchCode
 from devpilot.tools.test import RunTests
 from devpilot.verification import TaskVerifier
+from devpilot.verification.evidence import capture_snapshot
 
 
 def _write(path: Path, content: str) -> None:
@@ -74,6 +75,13 @@ def _init_git(repo: Path) -> None:
     _git("config", "core.autocrlf", "false")
     _git("add", "-A")
     _git("commit", "-m", "init")
+    capture_snapshot(repo, repo.parent / "artifacts")
+
+
+def _make_verifier(repo: Path) -> TaskVerifier:
+    verifier = TaskVerifier(RuntimeConfig())
+    verifier.bind_snapshot("verifier_test", repo.parent / "artifacts" / "trusted")
+    return verifier
 
 
 class TestVerifySuccess:
@@ -87,7 +95,7 @@ class TestVerifySuccess:
         _init_git(repo)
         _write(repo / "app.py", "x = 100\n")
 
-        verifier = TaskVerifier(RuntimeConfig())
+        verifier = _make_verifier(repo)
         state = _make_state(modified_files=["app.py"])
         result = await verifier.verify(
             _make_task(), str(repo), state, _full_registry()
@@ -106,7 +114,7 @@ class TestVerifySuccess:
         _init_git(repo)
         _write(repo / "app.py", "x = 100\n")
 
-        verifier = TaskVerifier(RuntimeConfig())
+        verifier = _make_verifier(repo)
         state = _make_state(modified_files=["app.py"])
         result = await verifier.verify(
             _make_task(), str(repo), state, _full_registry()
@@ -117,7 +125,7 @@ class TestVerifySuccess:
         assert "diff_non_empty" in check_names
         assert "forbidden_files" in check_names
         assert "modified_file_count" in check_names
-        assert len(result.checks) == 4
+        assert len(result.checks) == 5
 
 
 class TestVerifyTestsFail:
@@ -129,7 +137,7 @@ class TestVerifyTestsFail:
         _init_git(repo)
         _write(repo / "app.py", "x = 100\n")
 
-        verifier = TaskVerifier(RuntimeConfig())
+        verifier = _make_verifier(repo)
         state = _make_state(modified_files=["app.py"])
         result = await verifier.verify(
             _make_task(), str(repo), state, _full_registry()
@@ -150,7 +158,7 @@ class TestVerifyDiffEmpty:
         _write(repo / "test_pass.py", "def test_pass():\n    assert True\n")
         _init_git(repo)
 
-        verifier = TaskVerifier(RuntimeConfig())
+        verifier = _make_verifier(repo)
         state = _make_state(modified_files=[])
         result = await verifier.verify(
             _make_task(), str(repo), state, _full_registry()
@@ -174,8 +182,9 @@ class TestVerifyForbiddenFiles:
         _init_git(repo)
         _write(repo / "app.py", "x = 100\n")
 
-        verifier = TaskVerifier(RuntimeConfig())
-        state = _make_state(modified_files=[".env", "app.py"])
+        verifier = _make_verifier(repo)
+        _write(repo / ".env", "TEST_ONLY=1\n")
+        state = _make_state(modified_files=[])
         result = await verifier.verify(
             _make_task(), str(repo), state, _full_registry()
         )
@@ -198,9 +207,11 @@ class TestVerifyTooManyFiles:
         _init_git(repo)
         _write(repo / "app.py", "x = 100\n")
 
-        verifier = TaskVerifier(RuntimeConfig())
+        verifier = _make_verifier(repo)
         many_files = [f"file_{i}.py" for i in range(11)]
-        state = _make_state(modified_files=many_files)
+        for name in many_files:
+            _write(repo / name, "VALUE = 1\n")
+        state = _make_state(modified_files=[])
         result = await verifier.verify(
             _make_task(), str(repo), state, _full_registry()
         )

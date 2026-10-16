@@ -20,7 +20,7 @@ from devpilot.tools.context import ToolContext
 
 _ISSUE_PATH = (
     Path(__file__).resolve().parent.parent
-    / "evals"
+    / "devpilot" / "evals"
     / "issues"
     / "DEV-001.yaml"
 )
@@ -34,7 +34,10 @@ def _write(path: Path, content: str) -> None:
 def _setup_baseline(base: Path) -> None:
     base.mkdir(parents=True, exist_ok=True)
     _write(base / "app.py", "x = 1\nz = 3\n")
-    _write(base / "test_pass.py", "def test_ok():\n    assert True\n")
+    _write(
+        base / "test_pass.py",
+        "from app import x, z\n\ndef test_ok():\n    assert (x, z) == (1, 3)\n",
+    )
 
 
 _PATCH = (
@@ -71,6 +74,10 @@ def _make_responses() -> list[LLMResponse]:
         _resp_action("repo.search_code", query="orders"),
         _resp_action("repo.read_file", path="app.py"),
         _resp_action("code.apply_patch", patch=_PATCH),
+        _resp_action(
+            "code.create_file", path="tests/test_added_value.py",
+            content="from app import y\n\ndef test_added_value():\n    assert y == 2\n",
+        ),
         _resp_action("test.run"),
         _resp_finish(summary="Added status filter", risk="low"),
     ]

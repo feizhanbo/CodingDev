@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
+from devpilot.verification.evidence import validate_write
 
 
 class CreateFileInput(BaseModel):
@@ -43,6 +44,7 @@ constraints:
         guard = PathGuard(ctx.workspace_root)
         try:
             resolved = guard.validate_path(inp.path)
+            validate_write(Path(ctx.workspace_root), inp.path, ctx.trusted_root)
         except PermissionError as exc:
             return ToolResult(
                 success=False,
@@ -73,18 +75,24 @@ constraints:
 def _write_file(path: Path, content: str) -> None:
     """Create parent dirs and write UTF-8 content (no newline translation)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="")
+    with path.open("x", encoding="utf-8", newline="") as handle:
+        handle.write(content)
 
 
 async def _git_add(workspace_root: str, file_path: str) -> None:
     """Stage a file so it appears in git diff HEAD."""
     proc = await asyncio.create_subprocess_exec(
-        "git", "add", "--", file_path,
+        "git",
+        "add",
+        "--",
+        file_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=workspace_root,
     )
-    await proc.communicate()
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"git add failed: {stderr.decode(errors='replace')}")
 
 
 def _relative(path: Path, workspace_root: Path) -> str:

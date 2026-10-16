@@ -1,6 +1,6 @@
 """Tests verifying that trace.jsonl can be replayed to reconstruct a run.
 
-Loads an existing run's trace.jsonl (from a FakeLLM run) and verifies:
+Creates a fresh deterministic code repair and verifies its trace:
 - All expected event types are present.
 - The trace tells a complete story (run_started -> ... -> run_completed).
 - State/phase transitions are recorded in order.
@@ -8,11 +8,19 @@ Loads an existing run's trace.jsonl (from a FakeLLM run) and verifies:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from devpilot.cli import initialize_components
+from devpilot.domain.decision import AgentDecision, FinishIntent, ToolAction
+from devpilot.domain.task import DevelopmentTask
+from devpilot.llm.base import LLMResponse
+from devpilot.llm.fake import FakeLLMClient
+from devpilot.settings import Settings
 
 # Event types that must appear in any complete trace.
 REQUIRED_EVENTS = {
@@ -32,28 +40,6 @@ EXPECTED_PHASE_ORDER = [
     "completed",
 ]
 
-RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
-
-
-def _find_complete_run() -> Path | None:
-    """Return the most recent run directory that has a complete trace."""
-    if not RUNS_DIR.is_dir():
-        return None
-    candidates: list[Path] = []
-    for run_dir in sorted(RUNS_DIR.iterdir(), reverse=True):
-        if not run_dir.is_dir():
-            continue
-        trace_file = run_dir / "trace.jsonl"
-        if not trace_file.is_file():
-            continue
-        events = _load_trace(trace_file)
-        types = {e["event"] for e in events}
-        if "run_started" in types and "run_completed" in types:
-            candidates.append(run_dir)
-            break
-    return candidates[0] if candidates else None
-
-
 def _load_trace(trace_path: Path) -> list[dict[str, Any]]:
     """Load and parse all events from a trace.jsonl file."""
     events: list[dict[str, Any]] = []
@@ -69,15 +55,37 @@ def trace_file_text(trace_path: Path) -> str:
     return trace_path.read_text(encoding="utf-8")
 
 
-# Resolve the run to use for all tests (skipped if no complete run exists).
-_RUN_DIR = _find_complete_run()
-pytestmark = pytest.mark.skipif(_RUN_DIR is None, reason="No complete run found")
-
-
 @pytest.fixture(scope="module")
-def run_dir() -> Path:
-    assert _RUN_DIR is not None
-    return _RUN_DIR
+def run_dir(tmp_path_factory) -> Path:
+    """Produce fresh evidence on every test run, including a clean CI checkout."""
+    root = tmp_path_factory.mktemp("trace")
+    baseline = root / "baseline"
+    baseline.mkdir()
+    (baseline / "calculator.py").write_text("def add(a, b): return 0\n", encoding="utf-8")
+    (baseline / "test_calculator.py").write_text(
+        "from calculator import add\ndef test_add(): assert add(2, 3) == 5\n", encoding="utf-8"
+    )
+    settings = Settings(_env_file=None, workspace_root=str(root / "ws"),
+                        runs_root=str(root / "artifacts"))
+    runner = initialize_components(fake=True, settings=settings, base_repo=str(baseline))
+    actions = [
+        ToolAction(tool="repo.search_code", arguments={"query": "add"}),
+        ToolAction(tool="code.apply_patch", arguments={"patch": (
+            "--- a/calculator.py\n+++ b/calculator.py\n@@ -1 +1 @@\n"
+            "-def add(a, b): return 0\n+def add(a, b): return a + b\n"
+        )}),
+        ToolAction(tool="test.run", arguments={}),
+    ]
+    responses = [LLMResponse(model="fake", decision=AgentDecision(action=a)) for a in actions]
+    responses.append(LLMResponse(model="fake", decision=AgentDecision(
+        finish=FinishIntent(summary="Fixed addition", risk="low"))))
+    runner.agent.llm_client = FakeLLMClient(responses)
+    result = asyncio.run(runner.run(DevelopmentTask(
+        id="TRACE-SMOKE", title="Fix addition", description="Add both inputs",
+        acceptance_criteria=["Addition is correct"],
+    )))
+    assert result.status == "completed", result.error
+    return Path(runner.sandbox.get_runs_dir(result.run_id))
 
 
 @pytest.fixture(scope="module")

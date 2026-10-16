@@ -58,7 +58,7 @@ def _make_task() -> DevelopmentTask:
 def _setup_baseline_failing(base: Path) -> None:
     base.mkdir(parents=True, exist_ok=True)
     _write(base / "app.py", "x = 1\n")
-    _write(base / "test_app.py", "def test_app():\n    assert False\n")
+    _write(base / "test_app.py", "from app import x\n\ndef test_app():\n    assert x == 2\n")
 
 
 def _setup_baseline_passing(base: Path) -> None:
@@ -132,13 +132,13 @@ PATCH_MODIFY_APP = (
     "+y = 2\n"
 )
 
-PATCH_FIX_TEST = (
-    "--- a/test_app.py\n"
-    "+++ b/test_app.py\n"
+PATCH_FIX_APP = (
+    "--- a/app.py\n"
+    "+++ b/app.py\n"
     "@@ -1,2 +1,2 @@\n"
-    " def test_app():\n"
-    "-    assert False\n"
-    "+    assert True\n"
+    "-x = 1\n"
+    "+x = 2\n"
+    " y = 2\n"
 )
 
 
@@ -155,7 +155,7 @@ class TestRepairLoopComplete:
             _resp_action("code.apply_patch", patch=PATCH_MODIFY_APP),
             _resp_action("test.run", target="test_app.py"),
             _resp_finish(summary="done", risk="low"),
-            _resp_action("code.apply_patch", patch=PATCH_FIX_TEST),
+            _resp_action("code.apply_patch", patch=PATCH_FIX_APP),
             _resp_action("test.run", target="test_app.py"),
             _resp_finish(summary="all done", risk="low"),
         ]

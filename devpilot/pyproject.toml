@@ -32,5 +32,6 @@ line-length = 100
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 asyncio_mode = "auto"
 norecursedirs = ["workspaces", "runs", ".venv"]

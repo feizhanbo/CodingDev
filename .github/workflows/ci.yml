@@ -1,0 +1,52 @@
+name: Deterministic checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: '3.12'
+      - name: Install DevPilot
+        working-directory: devpilot
+        run: uv sync --frozen
+      - name: Install ShopFlow
+        working-directory: shopflow-order-service
+        run: uv sync --frozen
+      - name: Lint DevPilot
+        working-directory: devpilot
+        run: uv run --frozen ruff check .
+      - name: Lint ShopFlow
+        working-directory: shopflow-order-service
+        run: uv run --frozen ruff check .
+      - name: Test DevPilot
+        working-directory: devpilot
+        run: uv run --frozen pytest --junitxml=runs/unit.xml
+      - name: Test ShopFlow
+        working-directory: shopflow-order-service
+        run: uv run --frozen pytest --junitxml=runs/baseline.xml
+      - name: Validate eight benchmark tasks
+        run: uv run --project devpilot python scripts/check_benchmark.py
+      - name: Build wheel
+        working-directory: devpilot
+        run: uv build --wheel
+      - name: Verify installed wheel outside source
+        run: uv run --project devpilot python scripts/check_wheel.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checks-${{ matrix.os }}
+          path: |
+            devpilot/runs/*.xml
+            shopflow-order-service/runs/*.xml
+            runs/benchmark-*/summary.json
+            runs/benchmark-*/**/report.xml
+            runs/benchmark-*/**/output.log

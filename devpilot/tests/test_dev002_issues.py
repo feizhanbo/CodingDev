@@ -11,7 +11,7 @@ from devpilot.domain.task import DevelopmentTask
 
 _ISSUES_DIR = (
     Path(__file__).resolve().parent.parent
-    / "evals"
+    / "devpilot" / "evals"
     / "issues"
 )
 
@@ -49,12 +49,12 @@ class TestLoadDevIssues:
     def test_dev002_title_and_description(self) -> None:
         task = load_issue(str(_ISSUES_DIR / "DEV-002.yaml"))
         assert task.title == "Prevent invalid order cancellation"
-        assert "cancelled" in task.description
+        assert "shipped/completed" in task.description
 
     def test_dev003_title_and_description(self) -> None:
         task = load_issue(str(_ISSUES_DIR / "DEV-003.yaml"))
         assert task.title == "Fix order pagination edge case"
-        assert "page" in task.description
+        assert "negative skip/limit" in task.description
 
     def test_dev004_title_and_description(self) -> None:
         task = load_issue(str(_ISSUES_DIR / "DEV-004.yaml"))

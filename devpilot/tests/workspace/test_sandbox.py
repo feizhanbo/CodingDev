@@ -98,7 +98,7 @@ class TestSandboxCreate:
             ["git", "log", "--oneline"],
             cwd=repo_path,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         assert result.returncode == 0
         assert "baseline" in result.stdout

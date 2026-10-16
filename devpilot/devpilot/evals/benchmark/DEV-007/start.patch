@@ -1,0 +1,11 @@
+--- a/app/services/order_service.py
++++ b/app/services/order_service.py
+@@ -93,8 +93,6 @@
+         order = order_repo.get_by_id(order_id)
+         if not order:
+             raise ValueError(f"Order {order_id} not found")
+-        if order.status != "pending":
+-            raise ValueError(f"Cannot pay order with status {order.status}")
+         return order_repo.update_status(order_id, "paid")
+ 
+     @staticmethod

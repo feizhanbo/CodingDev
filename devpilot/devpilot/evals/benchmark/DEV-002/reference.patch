@@ -1,0 +1,22 @@
+--- a/app/services/order_service.py
++++ b/app/services/order_service.py
+@@ -108,4 +108,6 @@
+         order = order_repo.get_by_id(order_id)
+         if not order:
+             raise ValueError(f"Order {order_id} not found")
++        if order.status in ("shipped", "completed"):
++            raise ValueError(f"Cannot cancel order with status {order.status}")
+         return order_repo.update_status(order_id, "cancelled")
+--- /dev/null
++++ b/tests/test_issue_regression.py
+@@ -0,0 +1,10 @@
++import pytest
++from app.models.order import Order
++from app.services.order_service import OrderService
++
++def test_cannot_cancel_shipped(db_session):
++    order = Order(customer_id=1, status="shipped")
++    db_session.add(order)
++    db_session.commit()
++    with pytest.raises(ValueError):
++        OrderService.cancel_order(db_session, order.id)

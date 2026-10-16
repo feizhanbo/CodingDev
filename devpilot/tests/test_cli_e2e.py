@@ -21,7 +21,7 @@ from devpilot.tools.registry import ToolRegistry
 
 _ISSUE_PATH = (
     Path(__file__).resolve().parent.parent
-    / "evals"
+    / "devpilot" / "evals"
     / "issues"
     / "DEV-001.yaml"
 )
@@ -35,7 +35,10 @@ def _write(path: Path, content: str) -> None:
 def _setup_baseline(base: Path) -> None:
     base.mkdir(parents=True, exist_ok=True)
     _write(base / "app.py", "x = 1\nz = 3\n")
-    _write(base / "test_pass.py", "def test_ok():\n    assert True\n")
+    _write(
+        base / "test_pass.py",
+        "from app import x, z\n\ndef test_ok():\n    assert (x, z) == (1, 3)\n",
+    )
 
 
 _PATCH = (
@@ -71,6 +74,21 @@ def _make_responses() -> list[LLMResponse]:
             decision=AgentDecision(
                 action=ToolAction(
                     tool="code.apply_patch", arguments={"patch": _PATCH}
+                )
+            ),
+            model="fake",
+        ),
+        LLMResponse(
+            decision=AgentDecision(
+                action=ToolAction(
+                    tool="code.create_file",
+                    arguments={
+                        "path": "tests/test_added_value.py",
+                        "content": (
+                            "from app import y\n\ndef test_added_value():\n"
+                            "    assert y == 2\n"
+                        ),
+                    },
                 )
             ),
             model="fake",
@@ -124,7 +142,7 @@ class TestDev001E2E:
 
         assert result.status == "completed"
         assert result.phase == "completed"
-        assert result.total_steps == 4
+        assert result.total_steps == 5
         assert result.summary == "Added status filter"
         assert result.risk == "low"
         assert result.error is None

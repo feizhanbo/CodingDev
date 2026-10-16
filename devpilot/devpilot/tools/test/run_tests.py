@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
+from devpilot.tools.path_guard import PathGuard
 
-_PASSED_RE = re.compile(r"(\d+) passed")
-_FAILED_RE = re.compile(r"(\d+) failed")
 SUMMARY_LIMIT = 2000
 
 
@@ -48,12 +47,40 @@ constraints:
     # Configurable per-instance; tests override this to keep suites fast.
     timeout_seconds: int = 120
 
+    def __init__(
+        self,
+        python_executable: str | None = None,
+        timeout_seconds: int = 120,
+        runs_root: str = "./runs",
+    ) -> None:
+        self.python_executable = python_executable or sys.executable
+        self.timeout_seconds = timeout_seconds
+        self.runs_root = Path(runs_root).resolve()
+
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
         inp = args  # validated by registry as RunTestsInput
+        from devpilot.evals.benchmark import parse_junit
+
         target = inp.target if inp.target else "."
+        try:
+            if target.startswith("-"):
+                raise PermissionError("Test target cannot be a pytest option")
+            PathGuard(ctx.workspace_root).validate_path(target.split("::", 1)[0])
+            _validate_extra_args(inp.extra_args)
+        except PermissionError as exc:
+            return ToolResult(success=False, error=str(exc))
+        log_path = _log_path(ctx, self.runs_root)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path = log_path.with_suffix(".xml")
         cmd = [
-            sys.executable, "-m", "pytest", target,
-            "-v", "--tb=short", *inp.extra_args,
+            ctx.test_python or self.python_executable,
+            "-m",
+            "pytest",
+            target,
+            "-v",
+            "--tb=short",
+            *inp.extra_args,
+            f"--junitxml={report_path}",
         ]
 
         start = time.monotonic()
@@ -68,17 +95,19 @@ constraints:
             return ToolResult(
                 success=False,
                 error=f"Failed to start pytest: {exc}",
-                data={"exit_code": -1, "duration_ms": 0,
-                      "summary": str(exc), "log_file": "",
-                      "passed": None, "failed": None},
+                data={
+                    "exit_code": -1,
+                    "duration_ms": 0,
+                    "summary": str(exc),
+                    "log_file": "",
+                    "passed": None,
+                    "failed": None,
+                },
             )
-
-        log_path = _log_path(ctx)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=self.timeout_seconds
+                proc.communicate(), timeout=ctx.test_timeout_seconds or self.timeout_seconds
             )
         except TimeoutError:
             await _kill_and_wait(proc)
@@ -92,7 +121,9 @@ constraints:
                     "passed": None,
                     "failed": None,
                     "duration_ms": elapsed,
-                    "summary": f"Test timed out after {self.timeout_seconds}s",
+                    "summary": (
+                        f"Test timed out after {ctx.test_timeout_seconds or self.timeout_seconds}s"
+                    ),
                     "log_file": str(log_path),
                 },
             )
@@ -101,16 +132,20 @@ constraints:
         output = stdout.decode(errors="replace")
         _write_log(log_path, output)
 
-        passed = _first_int(_PASSED_RE, output)
-        failed = _first_int(_FAILED_RE, output)
+        evidence = parse_junit(report_path, proc.returncode)
         summary = output[-SUMMARY_LIMIT:]
 
         return ToolResult(
-            success=proc.returncode == 0,
+            success=evidence.status == "PASS",
             data={
                 "exit_code": proc.returncode,
-                "passed": passed,
-                "failed": failed,
+                "passed": evidence.passed,
+                "failed": evidence.failed,
+                "collected": evidence.collected,
+                "errors": evidence.errors,
+                "skipped": evidence.skipped,
+                "status": evidence.status,
+                "report_file": str(report_path),
                 "duration_ms": elapsed,
                 "summary": summary,
                 "log_file": str(log_path),
@@ -118,18 +153,34 @@ constraints:
         )
 
 
-def _log_path(ctx: ToolContext) -> Path:
-    """Derive the run artifact log path from the workspace root."""
-    return Path(ctx.workspace_root).parent / "runs" / ctx.run_id / "test-output.log"
+def _log_path(ctx: ToolContext, runs_root: Path | None = None) -> Path:
+    """Keep each invocation, including verifier retries, in the run artifact tree."""
+    root = (
+        Path(ctx.artifacts_dir)
+        if ctx.artifacts_dir
+        else ((runs_root or Path("./runs").resolve()) / ctx.run_id)
+    )
+    return root / "tests" / f"{uuid.uuid4().hex}.log"
 
 
 def _write_log(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _first_int(pattern: re.Pattern[str], text: str) -> int | None:
-    m = pattern.search(text)
-    return int(m.group(1)) if m else None
+def _validate_extra_args(arguments: list[str]) -> None:
+    value_options = {"-k", "-m"}
+    flags = {"-q", "-v", "-x", "--disable-warnings"}
+    index = 0
+    while index < len(arguments):
+        arg = arguments[index]
+        if arg in flags:
+            index += 1
+        elif arg in value_options and index + 1 < len(arguments):
+            index += 2
+        elif arg.startswith("--maxfail=") and arg.split("=", 1)[1].isdigit():
+            index += 1
+        else:
+            raise PermissionError(f"Unsupported pytest argument: {arg}")
 
 
 async def _kill_and_wait(proc: asyncio.subprocess.Process) -> None:

@@ -45,9 +45,7 @@ class TestRunTests:
     async def test_timeout(self, sample_project: Path) -> None:
         _write(
             sample_project / "test_slow.py",
-            "import time\n"
-            "def test_slow():\n"
-            "    time.sleep(30)\n",
+            "import time\ndef test_slow():\n    time.sleep(30)\n",
         )
         tool = RunTests()
         tool.timeout_seconds = 1
@@ -69,3 +67,40 @@ class TestRunTests:
         log_file = Path(result.data["log_file"])
         assert log_file.is_file()
         assert log_file.read_text(encoding="utf-8") != ""
+
+
+class TestEvidenceAndPolicy:
+    async def test_all_skipped_is_not_success(self, sample_project: Path) -> None:
+        _write(
+            sample_project / "test_skip.py",
+            "import pytest\n@pytest.mark.skip\ndef test_x(): pass\n",
+        )
+        tool = RunTests()
+        result = await tool.execute(
+            tool.input_model(target="test_skip.py"), _ctx(str(sample_project))
+        )
+        assert not result.success
+        assert result.data["skipped"] == 1
+        assert result.data["status"] == "ERROR"
+
+    async def test_escape_and_plugin_options_rejected(self, sample_project: Path) -> None:
+        tool = RunTests()
+        for values in (
+            {"target": "../outside.py"},
+            {"extra_args": ["-p", "evil"]},
+            {"target": "--collect-only"},
+            {"extra_args": ["--confcutdir=/"]},
+        ):
+            result = await tool.execute(tool.input_model(**values), _ctx(str(sample_project)))
+            assert not result.success
+            assert result.error
+
+    async def test_structured_counts_include_collection_errors(self, sample_project: Path) -> None:
+        _write(sample_project / "test_invalid.py", "def this is invalid syntax\n")
+        tool = RunTests()
+        result = await tool.execute(
+            tool.input_model(target="test_invalid.py"), _ctx(str(sample_project))
+        )
+        assert not result.success
+        assert result.data["errors"] > 0
+        assert result.data["status"] == "ERROR"

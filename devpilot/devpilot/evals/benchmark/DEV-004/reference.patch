@@ -1,0 +1,19 @@
+--- a/app/services/pricing_service.py
++++ b/app/services/pricing_service.py
+@@ -14,7 +14,7 @@
+         A tuple of (discount_amount, final_amount).
+     """
+     if coupon.discount_type == "percentage":
+-        discount = total_amount * (coupon.discount_value / 100)
++        discount = min(total_amount, total_amount * (coupon.discount_value / 100))
+     elif coupon.discount_type == "fixed":
+         discount = min(coupon.discount_value, total_amount)
+     else:
+--- /dev/null
++++ b/tests/test_issue_regression.py
+@@ -0,0 +1,5 @@
++from app.models.coupon import Coupon
++from app.services.pricing_service import apply_coupon
++
++def test_cap_percentage():
++    assert apply_coupon(30, Coupon(discount_type="percentage", discount_value=120)) == (30, 0)

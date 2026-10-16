@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from devpilot.cli import app
-from evals.runner import EvalResult, EvalRunner
+from devpilot.evals.runner import EvalResult, EvalRunner
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -300,7 +300,7 @@ class TestEvalCommand:
                 EvalResult(
                     issue_id="DEV-001",
                     run_id="run_mock1",
-                    task_success=True,
+                    task_success=None, evaluation_mode="smoke", evaluation_status="PASS",
                     visible_test_pass_rate=1.0,
                     avg_steps=4,
                     runtime_duration_ms=1000,
@@ -309,7 +309,7 @@ class TestEvalCommand:
                 EvalResult(
                     issue_id="DEV-002",
                     run_id="run_mock2",
-                    task_success=True,
+                    task_success=None, evaluation_mode="smoke", evaluation_status="PASS",
                     visible_test_pass_rate=1.0,
                     avg_steps=4,
                     runtime_duration_ms=1000,

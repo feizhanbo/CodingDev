@@ -29,6 +29,7 @@ from devpilot.tools.repo.file_cache import ReadFileCache
 from devpilot.tools.test.failure_parser import parse_test_failures
 from devpilot.tracing import MetricsCollector, TraceWriter
 from devpilot.verification import TaskVerifier
+from devpilot.verification.evidence import capture_snapshot
 from devpilot.workspace.sandbox import SandboxWorkspace
 
 
@@ -118,6 +119,9 @@ class CustomAgentRunner:
     async def run(self, task: DevelopmentTask) -> AgentRunResult:
         """Execute the agent loop for a development task."""
         start_time = time.time()
+        self.metrics.reset()
+        self.loop_guard.reset()
+        self.file_cache.clear()
 
         # 1. Initialize state
         run_id = f"run_{uuid.uuid4().hex[:8]}"
@@ -131,10 +135,15 @@ class CustomAgentRunner:
         })
         self._trace(run_id, 0, state.phase, "run_started")
 
-        # 2. Create workspace
-        workspace_path = self.sandbox.create(run_id)
-
         try:
+            # 2. Create workspace and freeze trusted evidence before any action.
+            workspace_path = self.sandbox.create(run_id)
+            trusted = capture_snapshot(
+                Path(workspace_path), Path(self.sandbox.get_runs_dir(run_id))
+            )
+            if self.verifier:
+                self.verifier.bind_snapshot(run_id, trusted)
+
             # 3. Main loop
             while state.total_steps < self.config.max_steps:
                 self.loop_guard.check_max_steps(state)
@@ -155,6 +164,15 @@ class CustomAgentRunner:
                             _attempt + 1, str(exc)[:200],
                         )
                         continue
+                    finally:
+                        if self.agent.last_request is not None:
+                            request = self.agent.last_request.model_dump()
+                            request.update(attempt=_attempt + 1, step=state.total_steps)
+                            self.metrics.record_llm_request(request)
+                            self._trace(
+                                run_id, state.total_steps, state.phase, "llm_request",
+                                data=request,
+                            )
                 decision_type = (
                     "finish" if decision.finish
                     else "action" if decision.action
@@ -347,7 +365,10 @@ class CustomAgentRunner:
                         arguments_summary=str(decision.action.arguments),
                     )
                     ctx = ToolContext(
-                        workspace_root=workspace_path, run_id=run_id
+                        workspace_root=workspace_path, run_id=run_id,
+                        artifacts_dir=self.sandbox.get_runs_dir(run_id),
+                        trusted_root=str(trusted),
+                        test_timeout_seconds=self.config.test_timeout_seconds,
                     )
                     tool_start = time.time()
 
@@ -677,6 +698,10 @@ class CustomAgentRunner:
             self.metrics.record_modified_file(f)
         result_data = json.loads(result.model_dump_json(indent=2))
         result_data["metrics"] = self.metrics.to_dict()
+        self.sandbox.save_artifact(
+            run_id, "llm-requests.json",
+            json.dumps(self.metrics.llm_requests, indent=2),
+        )
         self.sandbox.save_artifact(
             run_id, "result.json", json.dumps(result_data, indent=2)
         )

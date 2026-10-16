@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from typing import Any
 
 import openai
 
 from devpilot.domain.decision import AgentDecision
-from devpilot.llm.base import LLMClient, LLMMessage, LLMResponse
+from devpilot.llm.base import LLMClient, LLMMessage, LLMRequestRecord, LLMResponse
 from devpilot.llm.config import LLMConfig
 
 
@@ -39,7 +40,7 @@ class OpenAIClient(LLMClient):
 
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
-        kwargs: dict[str, Any] = {"api_key": config.api_key}
+        kwargs: dict[str, Any] = {"api_key": config.api_key, "max_retries": 0}
         if config.base_url:
             kwargs["base_url"] = config.base_url
         self._client = openai.AsyncOpenAI(**kwargs)
@@ -77,23 +78,32 @@ class OpenAIClient(LLMClient):
             )
 
         start = time.monotonic()
-        completion = await self._client.chat.completions.create(**kwargs)
-        latency_ms = int((time.monotonic() - start) * 1000)
-
-        raw_content = completion.choices[0].message.content or "{}"
-        decision = self._parse_decision(raw_content)
-
-        tokens_used: int | None = None
-        if completion.usage is not None:
-            tokens_used = completion.usage.total_tokens
-
-        return LLMResponse(
-            decision=decision,
-            model=completion.model,
-            tokens_used=tokens_used,
-            latency_ms=latency_ms,
-            raw_response=raw_content,
-        )
+        record = LLMRequestRecord(request_id=uuid.uuid4().hex, model=self._config.model)
+        self.last_request = record
+        try:
+            # Runtime owns retries so every transport attempt is observable.
+            completion = await self._client.chat.completions.create(**kwargs)
+            record.model = completion.model
+            if completion.usage is not None:
+                record.input_tokens = completion.usage.prompt_tokens
+                record.output_tokens = completion.usage.completion_tokens
+                record.total_tokens = completion.usage.total_tokens
+            record.status = "parse_error"
+            raw_content = completion.choices[0].message.content or "{}"
+            decision = self._parse_decision(raw_content)
+            record.status = "success"
+            return LLMResponse(
+                decision=decision,
+                model=completion.model,
+                tokens_used=record.total_tokens,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                raw_response=raw_content,
+            )
+        except Exception as exc:
+            record.error_type = type(exc).__name__
+            raise
+        finally:
+            record.latency_ms = int((time.monotonic() - start) * 1000)
 
     @staticmethod
     def _parse_decision(raw: str) -> AgentDecision:

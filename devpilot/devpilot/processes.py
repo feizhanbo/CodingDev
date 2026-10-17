@@ -203,7 +203,10 @@ def run_process(
     try:
         if os.name == "nt":
             job = WindowsJob(proc.pid)
-            proc.stdin.write((json.dumps(command) + "\n").encode("utf-8"))
+            if time.monotonic() - started >= timeout or (cancel is not None and cancel.is_set()):
+                stop_tree()
+            else:
+                proc.stdin.write((json.dumps(command) + "\n").encode("utf-8"))
             proc.stdin.close()
         reader.start()
         while True:
@@ -232,7 +235,10 @@ def run_process(
         proc.wait(timeout=5)
         if reader.ident:
             reader.join(timeout=5)
-        proc.stdout.close()
+        # An escaped/hostile descendant can hold the pipe open outside our process group.
+        # Never block forever acquiring a BufferedReader lock from its daemon reader.
+        if not reader.is_alive():
+            proc.stdout.close()
         if proc.stdin is not None:
             proc.stdin.close()
 

@@ -24,7 +24,7 @@ class Interrupted(BaseException):
     """Simulate abrupt interpreter loss without the runner's terminal error handler."""
 
 
-async def interrupted_run(tmp_path, config=None):
+async def interrupted_run(tmp_path, config=None, task=None):
     base = tmp_path / "base"
     _setup_baseline(base)
     config = config or RuntimeConfig()
@@ -43,7 +43,7 @@ async def interrupted_run(tmp_path, config=None):
 
     runner.agent.decide = crash
     with pytest.raises(Interrupted):
-        await runner.run(_make_task())
+        await runner.run(task or _make_task())
     checkpoint = next((tmp_path / "runs").glob("*/checkpoint.json"))
     return base, config, checkpoint.parent.name, checkpoint
 
@@ -289,3 +289,71 @@ async def test_ready_boundary_restores_test_retry_and_repair_history(tmp_path):
     assert result.error == "Max retries exceeded"
     assert result.budget["llm_requests"] == 2
     assert resumed.metrics.test_retries == 2
+
+
+async def test_resume_reads_chinese_checkpoint_as_utf8(tmp_path):
+    task = _make_task().model_copy(
+        update={"title": "订单恢复", "description": "保留原始任务与证据"}
+    )
+    base, config, run_id, checkpoint = await interrupted_run(tmp_path, task=task)
+    assert "订单恢复" in checkpoint.read_text(encoding="utf-8")
+    runner = _make_runner([_resp_finish("已完成")], config, base, tmp_path)
+    result = await runner.resume(run_id)
+    assert result.status == "completed"
+    assert result.summary == "已完成"
+
+
+async def test_chinese_resume_with_utf8_mode_disabled(tmp_path):
+    import sys
+
+    from devpilot.processes import run_process
+    from devpilot.security import process_environment
+
+    task = _make_task().model_copy(update={"title": "订单恢复"})
+    base, _, run_id, _ = await interrupted_run(tmp_path, task=task)
+    script = (
+        "import asyncio,json;from pathlib import Path;"
+        "from devpilot.runtime.base import RuntimeConfig;"
+        "from tests.runtime.test_runner import _make_runner,_resp_finish;"
+        f"root=Path({str(tmp_path)!r});"
+        f"runner=_make_runner([_resp_finish()],RuntimeConfig(),Path({str(base)!r}),root);"
+        f"result=asyncio.run(runner.resume({run_id!r}));"
+        "assert result.status=='completed', result;"
+        f"state=json.loads((root/'runs'/{run_id!r}/'state.json').read_text(encoding='utf-8'));"
+        f"assert state['task']['title']=={ascii('订单恢复')};print('locale-resume-ok')"
+    )
+    env = process_environment()
+    env["PYTHONUTF8"] = "0"
+    log = tmp_path / "locale.log"
+    result = run_process(
+        [sys.executable, "-X", "utf8=0", "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        log=log,
+        timeout=15,
+    )
+    assert result.exit_code == 0, log.read_text(encoding="utf-8")
+    assert "locale-resume-ok" in log.read_text(encoding="utf-8")
+
+
+async def test_new_run_id_collision_preserves_existing_evidence(tmp_path, monkeypatch):
+    import uuid
+
+    base = tmp_path / "base"
+    _setup_baseline(base)
+    old = tmp_path / "runs" / "run_1234abcd" / "result.json"
+    old.parent.mkdir(parents=True)
+    old.write_text("historical evidence")
+    real_uuid = uuid.uuid4
+    calls = []
+
+    def collision_once():
+        calls.append(1)
+        return uuid.UUID("1234abcd-0000-0000-0000-000000000000") if len(calls) == 1 else real_uuid()
+
+    monkeypatch.setattr("devpilot.runtime.custom.runner.uuid.uuid4", collision_once)
+    runner = _make_runner([_resp_finish()], RuntimeConfig(), base, tmp_path)
+    result = await runner.run(_make_task())
+    assert result.status == "completed"
+    assert result.run_id != "run_1234abcd"
+    assert old.read_text() == "historical evidence"

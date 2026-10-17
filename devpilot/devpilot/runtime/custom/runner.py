@@ -141,8 +141,17 @@ class CustomAgentRunner:
 
     async def run(self, task: DevelopmentTask) -> AgentRunResult:
         """Execute a new run under an OS lock that also protects resume."""
-        run_id = f"run_{uuid.uuid4().hex[:8]}"
-        with RunLock(Path(self.sandbox.get_runs_dir(run_id)) / ".run.lock"):
+        while True:
+            run_id = f"run_{uuid.uuid4().hex[:8]}"
+            directory = Path(self.sandbox.get_runs_dir(run_id))
+            if Path(self.sandbox.get_repo_path(run_id)).parent.exists():
+                continue
+            try:
+                directory.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                continue
+        with RunLock(directory / ".run.lock"):
             return await self._run(task, run_id)
 
     async def resume(self, run_id: str) -> AgentRunResult:
@@ -159,7 +168,9 @@ class CustomAgentRunner:
         if workspace.resolve() != workspace or workspace.parent.is_symlink():
             raise ValueError("Linked workspace cannot be resumed")
         with RunLock(directory / ".run.lock"):
-            checkpoint = Checkpoint.model_validate_json((directory / "checkpoint.json").read_text())
+            checkpoint = Checkpoint.model_validate_json(
+                (directory / "checkpoint.json").read_text(encoding="utf-8")
+            )
             if checkpoint.run_id != run_id or checkpoint.state.run_id != run_id:
                 raise ValueError("Checkpoint run ID mismatch")
             if checkpoint.stage not in {"ready", "llm_inflight"}:

@@ -624,6 +624,7 @@ def workspace_report(retention_days: int = typer.Option(7, min=1)) -> None:
             {
                 "run_id": folder.name,
                 "logical_bytes": size,
+                "physical_bytes": tree_bytes(folder),
                 "manual_archive_candidate": closed and old,
             }
         )

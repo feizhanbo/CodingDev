@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.security import redact
 from devpilot.storage import atomic_write
@@ -68,3 +70,15 @@ def test_atomic_write_and_known_secret_redaction(tmp_path):
     atomic_write(target, redact('{"error":"synthetic-secret"}', ("synthetic-secret",)))
     assert json.loads(target.read_text())["error"] == "[REDACTED]"
     assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.parametrize("run_id", ["..", ".", "../outside", "nested/../../outside"])
+def test_destroy_rejects_resolved_targets_outside_workspace(tmp_path, monkeypatch, run_id):
+    from devpilot.workspace.sandbox import SandboxWorkspace
+
+    sandbox = SandboxWorkspace(str(tmp_path), str(tmp_path / "ws"), str(tmp_path / "runs"))
+    calls = []
+    monkeypatch.setattr("devpilot.workspace.sandbox.shutil.rmtree", lambda *a, **k: calls.append(a))
+    with pytest.raises(PermissionError):
+        sandbox.destroy(run_id)
+    assert calls == []

@@ -124,7 +124,7 @@ class SandboxWorkspace:
         """
         workspace_dir = self.workspace_root / run_id
         if (
-            workspace_dir.parent.resolve() != self.workspace_root
+            workspace_dir.resolve().parent != self.workspace_root
             or workspace_dir.resolve() == self.workspace_root
             or linked(workspace_dir)
         ):

@@ -20,7 +20,9 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_prefix="DEVPILOT_", env_file=".env", extra="ignore",
+        env_prefix="DEVPILOT_",
+        env_file=".env",
+        extra="ignore",
     )
 
     model: str = "gpt-4o"
@@ -33,6 +35,11 @@ class Settings(BaseSettings):
     max_modified_files: int = Field(default=10, gt=0)
     max_patch_failures: int = Field(default=3, gt=0)
     test_timeout_seconds: int = Field(default=120, gt=0)
+    max_llm_requests: int = Field(default=90, gt=0)
+    llm_timeout_seconds: float = Field(default=120, gt=0)
+    max_run_seconds: float = Field(default=1800, gt=0)
+    workspace_max_bytes: int = Field(default=268435456, gt=0)
+    workspace_total_max_bytes: int = Field(default=2147483648, gt=0)
     test_python: str = sys.executable
     network_access: bool = False
     workspace_root: str = "./workspaces"
@@ -40,19 +47,19 @@ class Settings(BaseSettings):
     base_repo: str = "../shopflow-order-service"
 
     def runtime_config(self) -> RuntimeConfig:
-        return RuntimeConfig(**{
-            name: getattr(self, name) for name in RuntimeConfig.__dataclass_fields__
-        })
+        return RuntimeConfig(
+            **{name: getattr(self, name) for name in RuntimeConfig.__dataclass_fields__}
+        )
 
     def llm_config(self) -> LLMConfig:
-        return LLMConfig(_env_file=None, **{
-            name: getattr(self, name) for name in LLMConfig.model_fields
-        })
+        return LLMConfig(
+            _env_file=None, **{name: getattr(self, name) for name in LLMConfig.model_fields}
+        )
 
     def workspace_config(self) -> WorkspaceConfig:
-        return WorkspaceConfig(_env_file=None, **{
-            name: getattr(self, name) for name in WorkspaceConfig.model_fields
-        })
+        return WorkspaceConfig(
+            _env_file=None, **{name: getattr(self, name) for name in WorkspaceConfig.model_fields}
+        )
 
     def public_snapshot(self) -> dict:
         """Do not persist credentials with run artifacts."""

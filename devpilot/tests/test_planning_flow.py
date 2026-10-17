@@ -41,9 +41,14 @@ def _setup_baseline(base: Path) -> None:
 def _full_registry() -> ToolRegistry:
     reg = ToolRegistry()
     for tool in (
-        ListFiles(), ReadFile(), SearchCode(),
-        ApplyPatch(), CreateFile(),
-        RunTests(), GitDiff(), GitStatus(),
+        ListFiles(),
+        ReadFile(),
+        SearchCode(),
+        ApplyPatch(),
+        CreateFile(),
+        RunTests(),
+        GitDiff(),
+        GitStatus(),
     ):
         reg.register(tool)
     return reg
@@ -65,7 +70,9 @@ def _make_plan(revision: int = 1) -> ImplementationPlan:
         steps=[
             PlanStep(id=1, description="Read existing code", status="pending"),
             PlanStep(
-                id=2, description="Implement changes", status="pending",
+                id=2,
+                description="Implement changes",
+                status="pending",
                 verification_hint="Run pytest",
             ),
         ],
@@ -110,9 +117,7 @@ def _make_runner(
 
 def _resp_action(tool: str, **args: object) -> LLMResponse:
     return LLMResponse(
-        decision=AgentDecision(
-            action=ToolAction(tool=tool, arguments=dict(args))
-        ),
+        decision=AgentDecision(action=ToolAction(tool=tool, arguments=dict(args))),
         model="fake",
     )
 
@@ -126,26 +131,15 @@ def _resp_finish(summary: str = "done", risk: str = "low") -> LLMResponse:
     )
 
 
-def _resp_with_plan(
-    tool: str, plan: ImplementationPlan, **args: object
-) -> LLMResponse:
-    return LLMResponse(
-        decision=AgentDecision(
-            action=ToolAction(tool=tool, arguments=dict(args)),
-            plan_update=plan,
-        ),
-        model="fake",
-    )
+def _resp_with_plan(tool: str, plan: ImplementationPlan, **args: object) -> list[LLMResponse]:
+    """The one-branch contract requires a plan and an action in separate turns."""
+    return [
+        LLMResponse(decision=AgentDecision(plan_update=plan), model="fake"),
+        _resp_action(tool, **args),
+    ]
 
 
-PATCH_MODIFY_APP = (
-    "--- a/app.py\n"
-    "+++ b/app.py\n"
-    "@@ -1 +1,2 @@\n"
-    "-x = 1\n"
-    "+x = 1\n"
-    "+y = 2\n"
-)
+PATCH_MODIFY_APP = "--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n-x = 1\n+x = 1\n+y = 2\n"
 
 
 def _read_trace_events(runs_dir: Path) -> list[dict]:
@@ -163,10 +157,8 @@ class TestPlanCreation:
 
         responses = [
             _resp_action("repo.search_code", query="orders"),
-            _resp_with_plan("repo.read_file", _make_plan(1), path="app.py"),
-            _resp_with_plan(
-                "code.apply_patch", _make_plan(2), patch=PATCH_MODIFY_APP
-            ),
+            *_resp_with_plan("repo.read_file", _make_plan(1), path="app.py"),
+            *_resp_with_plan("code.apply_patch", _make_plan(2), patch=PATCH_MODIFY_APP),
             _resp_action("test.run", target="test_pass.py"),
             _resp_finish(summary="All done", risk="low"),
         ]
@@ -190,10 +182,8 @@ class TestPlanCreation:
 
         responses = [
             _resp_action("repo.search_code", query="orders"),
-            _resp_with_plan("repo.read_file", _make_plan(1), path="app.py"),
-            _resp_with_plan(
-                "code.apply_patch", _make_plan(2), patch=PATCH_MODIFY_APP
-            ),
+            *_resp_with_plan("repo.read_file", _make_plan(1), path="app.py"),
+            *_resp_with_plan("code.apply_patch", _make_plan(2), patch=PATCH_MODIFY_APP),
             _resp_action("test.run", target="test_pass.py"),
             _resp_finish(summary="done", risk="low"),
         ]
@@ -205,9 +195,7 @@ class TestPlanCreation:
         assert result.status == "completed"
 
         runs_dir = Path(runner.sandbox.runs_root) / result.run_id
-        state_data = json.loads(
-            (runs_dir / "state.json").read_text(encoding="utf-8")
-        )
+        state_data = json.loads((runs_dir / "state.json").read_text(encoding="utf-8"))
         assert state_data["plan"] is not None
         assert state_data["plan"]["revision"] == 2
         assert len(state_data["plan"]["steps"]) == 2
@@ -221,23 +209,17 @@ class TestPlanVisibleInContext:
         state = _make_state_with_plan("planning")
 
         messages = cb.build(state, "/workspace")
-        state_msg = next(
-            m for m in messages if "Implementation Plan" in m.content
-        )
+        state_msg = next(m for m in messages if "Implementation Plan" in m.content)
         assert "revision 1" in state_msg.content
         assert "Read existing code" in state_msg.content
         assert "Implement changes" in state_msg.content
 
-    def test_plan_with_verification_hint(
-        self, registry: ToolRegistry
-    ) -> None:
+    def test_plan_with_verification_hint(self, registry: ToolRegistry) -> None:
         cb = ContextBuilder(RuntimeConfig(), registry)
         state = _make_state_with_plan("planning")
 
         messages = cb.build(state, "/workspace")
-        state_msg = next(
-            m for m in messages if "Implementation Plan" in m.content
-        )
+        state_msg = next(m for m in messages if "Implementation Plan" in m.content)
         assert "Verification: Run pytest" in state_msg.content
 
     def test_plan_step_status_shown(self, registry: ToolRegistry) -> None:
@@ -252,9 +234,7 @@ class TestPlanVisibleInContext:
         )
 
         messages = cb.build(state, "/workspace")
-        state_msg = next(
-            m for m in messages if "Implementation Plan" in m.content
-        )
+        state_msg = next(m for m in messages if "Implementation Plan" in m.content)
         assert "[completed]" in state_msg.content
         assert "[pending]" in state_msg.content
 
@@ -268,11 +248,9 @@ class TestPlanUpdateDuringRepair:
 
         responses = [
             _resp_action("repo.search_code", query="orders"),
-            _resp_with_plan("repo.read_file", _make_plan(1), path="app.py"),
+            *_resp_with_plan("repo.read_file", _make_plan(1), path="app.py"),
             _resp_finish(summary="done", risk="low"),
-            _resp_with_plan(
-                "code.apply_patch", _make_plan(2), patch=PATCH_MODIFY_APP
-            ),
+            *_resp_with_plan("code.apply_patch", _make_plan(2), patch=PATCH_MODIFY_APP),
             _resp_action("test.run", target="test_pass.py"),
             _resp_finish(summary="all done", risk="low"),
         ]
@@ -290,27 +268,21 @@ class TestPlanUpdateDuringRepair:
         assert "plan_created" in event_types
         assert "plan_updated" in event_types
 
-        state_data = json.loads(
-            (runs_dir / "state.json").read_text(encoding="utf-8")
-        )
+        state_data = json.loads((runs_dir / "state.json").read_text(encoding="utf-8"))
         assert state_data["plan"]["revision"] == 2
 
 
 class TestPlanTraceEvents:
     """Test plan_created and plan_updated trace event ordering."""
 
-    async def test_plan_created_before_plan_updated(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_plan_created_before_plan_updated(self, tmp_path: Path) -> None:
         baseline = tmp_path / "baseline"
         _setup_baseline(baseline)
 
         responses = [
             _resp_action("repo.search_code", query="orders"),
-            _resp_with_plan("repo.read_file", _make_plan(1), path="app.py"),
-            _resp_with_plan(
-                "code.apply_patch", _make_plan(2), patch=PATCH_MODIFY_APP
-            ),
+            *_resp_with_plan("repo.read_file", _make_plan(1), path="app.py"),
+            *_resp_with_plan("code.apply_patch", _make_plan(2), patch=PATCH_MODIFY_APP),
             _resp_action("test.run", target="test_pass.py"),
             _resp_finish(summary="done", risk="low"),
         ]

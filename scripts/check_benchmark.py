@@ -13,8 +13,7 @@ target_python = repo / "shopflow-order-service/.venv" / (
 )
 output = repo / "runs" / f"benchmark-{uuid.uuid4().hex}"
 subprocess.run([
-    sys.executable, "-m", "devpilot.cli", "benchmark-check", "--base-repo",
-    str(repo / "shopflow-order-service"), "--test-python", str(target_python),
+    sys.executable, "-m", "devpilot.cli", "benchmark-check", "--test-python", str(target_python),
     "--output", str(output),
 ], check=True)
 print(f"Benchmark evidence: {output / 'summary.json'}")

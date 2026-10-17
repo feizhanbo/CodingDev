@@ -251,6 +251,10 @@ VISIBLE_TESTS = {
 def main() -> None:
     base = read_baseline()
     DEST.mkdir(parents=True, exist_ok=True)
+    for relative, value in base.items():
+        target = DEST / "baseline" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(value, encoding="utf-8", newline="")
     manifest = {
         "schema_version": 1,
         "dataset_version": "v1.1",

@@ -1,4 +1,5 @@
 """System prompt templates for the DevPilot agent (design doc §13.4)."""
+
 from __future__ import annotations
 
 from devpilot.runtime.base import RuntimeConfig
@@ -72,7 +73,8 @@ POLICY_PROMPT = """Tool and Security Policy:
 - No shell access. Only registered tools are available.
 - Maximum {max_steps} steps, {max_test_retries} test retries.
 - You can request finish, but Runtime verifies completion.
-- Network access is disabled.
+- Execution mode is trusted_local: candidate Python runs with host permissions.
+- Network access is not enforced; only trusted repositories may be executed.
 """
 
 REPOSITORY_INSTRUCTIONS = """ShopFlow Order Service Architecture:

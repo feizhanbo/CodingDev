@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import subprocess
+import time
 import uuid
 from collections.abc import Callable
 from importlib.resources import files
@@ -13,12 +14,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from devpilot.cli import initialize_components, load_issue
 from devpilot.domain.result import AgentRunResult
 from devpilot.domain.state import DevPilotState
 from devpilot.domain.task import DevelopmentTask
-from devpilot.runtime.base import RuntimeConfig
-from devpilot.runtime.custom.runner import CustomAgentRunner
+from devpilot.evals.metrics import collect_metrics
+from devpilot.runtime.base import AgentRunner, RuntimeConfig
 from devpilot.settings import Settings
 from devpilot.workspace.sandbox import SandboxWorkspace
 
@@ -48,6 +48,9 @@ class EvalResult(BaseModel):
     runtime_duration_ms: int = 0
     agent_status: str
     error: str | None = None
+    token_usage: int | None = None
+    known_tokens: int = 0
+    llm_requests: int = 0
 
 
 class EvalRunner:
@@ -55,13 +58,24 @@ class EvalRunner:
 
     def __init__(
         self,
-        base_repo_path: str,
+        base_repo_path: str | None = None,
         issues_dir: str | None = None,
         hidden_tests_dir: str | None = None,
         config: RuntimeConfig | None = None,
         settings: Settings | None = None,
+        runner_factory: Callable[..., AgentRunner] | None = None,
     ) -> None:
-        self.base_repo = Path(base_repo_path).resolve()
+        from devpilot.evals.benchmark import packaged_baseline
+
+        self.base_repo = (
+            Path(base_repo_path).resolve()
+            if base_repo_path
+            else (
+                Path((settings or Settings()).base_repo).resolve()
+                if issues_dir
+                else packaged_baseline()
+            )
+        )
         self.issues_dir = (
             Path(issues_dir) if issues_dir else Path(str(files("devpilot.evals") / "issues"))
         )
@@ -72,6 +86,7 @@ class EvalRunner:
         )
         self.settings = settings or Settings()
         self.config = config or self.settings.runtime_config()
+        self.runner_factory = runner_factory
 
     async def run_eval(
         self,
@@ -85,6 +100,8 @@ class EvalRunner:
         mode = "smoke" if fake else "capability"
         fallback_id = f"eval_error_{uuid.uuid4().hex[:12]}"
         try:
+            from devpilot.cli import load_issue
+
             task = load_issue(str(self.issues_dir / f"{issue_id}.yaml"))
             runner = self._init_components(fake=fake, on_event=on_event)
             builtin = self.issues_dir.resolve() == (resource_root() / "issues").resolve()
@@ -95,9 +112,13 @@ class EvalRunner:
                     workspace_root=str(runner.sandbox.workspace_root),
                     runs_root=str(runner.sandbox.runs_root),
                 )
+            runner.sandbox.secrets = (self.settings.api_key,)
+            runner.sandbox.max_bytes = self.settings.workspace_max_bytes
+            runner.sandbox.total_max_bytes = self.settings.workspace_total_max_bytes
             run_result = await runner.run(task)
             evidence = runner.verifier.last_results.get(run_result.run_id, {})
             visible = evidence.get("visible", {})
+            self.deadline = runner.deadline
             hidden = (
                 {"status": "NOT_EVALUATED", "details": "Smoke does not run hidden acceptance tests"}
                 if fake
@@ -141,6 +162,11 @@ class EvalRunner:
                 runtime_duration_ms=run_result.duration_ms or 0,
                 agent_status=run_result.status,
                 error=run_result.error,
+                token_usage=runner.metrics.to_dict()["tokens"]
+                if hasattr(runner, "metrics")
+                else None,
+                known_tokens=runner.metrics.tokens_used if hasattr(runner, "metrics") else 0,
+                llm_requests=run_result.budget.get("llm_requests", 0),
                 verification={"visible": visible, "hidden": hidden, "added": evidence.get("added")},
             )
             runner.sandbox.save_artifact(
@@ -184,9 +210,14 @@ class EvalRunner:
         self,
         fake: bool = False,
         on_event: Callable[[str, dict], None] | None = None,
-    ) -> CustomAgentRunner:
-        """Initialize runner with all components."""
-        return initialize_components(
+    ) -> AgentRunner:
+        """Resolve the default lazily; callers can inject another runtime factory."""
+        factory = self.runner_factory
+        if factory is None:
+            from devpilot.cli import initialize_components
+
+            factory = initialize_components
+        return factory(
             self.config,
             fake=fake,
             base_repo=None if fake else str(self.base_repo),
@@ -242,12 +273,20 @@ class EvalRunner:
                 "pass_rate": None,
                 "details": "Missing or placeholder hidden tests",
             }
+        if getattr(self, "deadline", None) is not None and time.monotonic() >= self.deadline:
+            return {
+                "status": "ERROR",
+                "passed": False,
+                "pass_rate": None,
+                "details": "Run deadline exceeded before hidden tests",
+            }
         suite = run_independent_suite(
             Path(sandbox.get_repo_path(run_id)),
             self.hidden_tests_dir / issue_id,
             Path(sandbox.get_runs_dir(run_id)) / "hidden",
             self.settings.test_python,
             timeout=self.config.test_timeout_seconds,
+            deadline=getattr(self, "deadline", None),
             trusted_fixtures=self.hidden_tests_dir.resolve()
             == (resource_root() / "hidden_tests").resolve(),
         )
@@ -281,18 +320,7 @@ class EvalRunner:
 
     def _collect_metrics(self, run_result: AgentRunResult, state: DevPilotState) -> dict:
         """Collect metrics from run result and state."""
-        tool_calls = sum(1 for o in run_result.observations if o.source == "tool")
-        tool_failures = sum(
-            1 for o in run_result.observations if o.source == "tool" and not o.success
-        )
-        return {
-            "total_steps": run_result.total_steps,
-            "tool_calls": tool_calls,
-            "tool_failures": tool_failures,
-            "test_retries": state.retry_count,
-            "modified_files": len(run_result.modified_files),
-            "duration_ms": run_result.duration_ms or 0,
-        }
+        return collect_metrics(run_result, state)
 
     def _save_final_diff(self, run_id: str, sandbox: SandboxWorkspace) -> str:
         """Get git diff from workspace and save as final.diff artifact."""
@@ -363,15 +391,21 @@ class EvalRunner:
 
         total = len(results)
         capability = [r for r in results if r.evaluation_mode == "capability"]
-        counts = {status: sum(r.evaluation_status == status for r in capability)
-                  for status in ("PASS", "FAIL", "NOT_EVALUATED", "ERROR")}
+        counts = {
+            status: sum(r.evaluation_status == status for r in capability)
+            for status in ("PASS", "FAIL", "NOT_EVALUATED", "ERROR")
+        }
         valid = counts["PASS"] + counts["FAIL"]
         lines.append("-" * len(header))
-        lines.append(f"Total: {total}, Capability success: {counts['PASS']}; "
-                     f"FAIL: {counts['FAIL']}; NOT_EVALUATED: {counts['NOT_EVALUATED']}; "
-                     f"ERROR: {counts['ERROR']}")
-        lines.append(f"Capability coverage: {valid}/{len(capability)}; "
-                     f"Smoke runs: {total - len(capability)} (excluded from capability success)")
+        lines.append(
+            f"Total: {total}, Capability success: {counts['PASS']}; "
+            f"FAIL: {counts['FAIL']}; NOT_EVALUATED: {counts['NOT_EVALUATED']}; "
+            f"ERROR: {counts['ERROR']}"
+        )
+        lines.append(
+            f"Capability coverage: {valid}/{len(capability)}; "
+            f"Smoke runs: {total - len(capability)} (excluded from capability success)"
+        )
         return "\n".join(lines)
 
     def generate_comparison_table(self, results: list[EvalResult]) -> str:

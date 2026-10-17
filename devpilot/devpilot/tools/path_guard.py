@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from devpilot.security import forbidden, linked
+
 
 class PathGuard:
     """Validate that filesystem paths stay inside the workspace sandbox."""
@@ -39,9 +41,7 @@ class PathGuard:
 
         # 3. The resolved path must live under workspace root.
         if not resolved.is_relative_to(self.workspace_root):
-            raise PermissionError(
-                f"Path '{path}' resolves outside workspace root"
-            )
+            raise PermissionError(f"Path '{path}' resolves outside workspace root")
 
         # 4. Reject symlinks pointing outside the workspace.
         self._check_symlinks(candidate)
@@ -66,22 +66,10 @@ class PathGuard:
         accumulated = self.workspace_root
         for part in rel.parts:
             accumulated = accumulated / part
-            if accumulated.is_symlink():
-                target = accumulated.resolve()
-                if not target.is_relative_to(self.workspace_root):
-                    raise PermissionError(
-                        f"Symlink '{accumulated}' points outside workspace root"
-                    )
+            if linked(accumulated):
+                raise PermissionError(f"Linked path '{accumulated}' is not permitted")
 
     def _check_forbidden(self, rel_str: str) -> None:
         """Reject forbidden files and patterns in the relative path."""
-        for forbidden in self.FORBIDDEN_FILES:
-            if rel_str == forbidden or rel_str.startswith(forbidden + "/"):
-                raise PermissionError(
-                    f"Access to forbidden file '{forbidden}' is denied"
-                )
-        for pattern in self.FORBIDDEN_PATTERNS:
-            if pattern in rel_str:
-                raise PermissionError(
-                    f"Access to forbidden path pattern '{pattern}' is denied"
-                )
+        if forbidden(rel_str):
+            raise PermissionError(f"Access to forbidden path '{rel_str}' is denied")

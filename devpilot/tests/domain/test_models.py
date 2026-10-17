@@ -222,10 +222,8 @@ class TestDevPilotState:
 
 class TestAgentDecision:
     def test_empty_decision(self) -> None:
-        decision = AgentDecision()
-        assert decision.action is None
-        assert decision.finish is None
-        assert decision.plan_update is None
+        with pytest.raises(ValueError, match="Exactly one"):
+            AgentDecision()
 
     def test_only_action(self) -> None:
         decision = AgentDecision(
@@ -256,34 +254,19 @@ class TestAgentDecision:
         assert decision.plan_update.goal == "g"
 
     def test_action_and_finish(self) -> None:
-        decision = AgentDecision(
-            action=ToolAction(tool="run_tests", arguments={}),
-            finish=FinishIntent(summary="Done", risk="medium"),
-        )
-        assert decision.action is not None
-        assert decision.finish is not None
-        assert decision.plan_update is None
+        with pytest.raises(ValueError, match="Exactly one"):
+            AgentDecision(action=ToolAction(tool="run_tests", arguments={}),
+                          finish=FinishIntent(summary="Done", risk="medium"))
 
     def test_all_three(self) -> None:
-        plan = ImplementationPlan(
-            goal="g", steps=[PlanStep(id=1, description="s", status="pending")]
-        )
-        decision = AgentDecision(
-            action=ToolAction(tool="apply_patch", arguments={"file": "a.py"}),
-            finish=FinishIntent(summary="All done", risk="high"),
-            plan_update=plan,
-        )
-        assert decision.action is not None
-        assert decision.finish is not None
-        assert decision.plan_update is not None
+        with pytest.raises(ValueError, match="Exactly one"):
+            AgentDecision(action=ToolAction(tool="apply_patch", arguments={}),
+                          finish=FinishIntent(summary="Done", risk="high"),
+                          plan_update=ImplementationPlan(goal="g", steps=[]))
 
     def test_serialization_roundtrip(self) -> None:
-        decision = AgentDecision(
-            action=ToolAction(tool="read_file", arguments={"path": "/x"}),
-            finish=FinishIntent(summary="Done", risk="low"),
-        )
-        restored = AgentDecision.model_validate(decision.model_dump())
-        assert restored == decision
+        decision = AgentDecision(action=ToolAction(tool="read_file", arguments={"path": "/x"}))
+        assert AgentDecision.model_validate(decision.model_dump()) == decision
 
     def test_finish_invalid_risk_rejected(self) -> None:
         with pytest.raises(ValidationError):

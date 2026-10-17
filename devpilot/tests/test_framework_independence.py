@@ -40,13 +40,13 @@ def _import_and_check_runtime(import_stmt: str) -> set[str]:
     result = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
-        text=True, encoding="utf-8", errors="replace",
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=str(PROJECT_ROOT),
     )
     if result.returncode != 0:
-        pytest.fail(
-            f"Import failed: {import_stmt}\n{result.stderr.strip()}"
-        )
+        pytest.fail(f"Import failed: {import_stmt}\n{result.stderr.strip()}")
     return {m for m in result.stdout.splitlines() if m.strip()}
 
 
@@ -54,38 +54,26 @@ class TestDomainIndependence:
     """Domain models must not import any runtime modules."""
 
     def test_state_no_runtime(self) -> None:
-        assert not _import_and_check_runtime(
-            "import devpilot.domain.state"
-        )
+        assert not _import_and_check_runtime("import devpilot.domain.state")
 
     def test_task_no_runtime(self) -> None:
-        assert not _import_and_check_runtime(
-            "import devpilot.domain.task"
-        )
+        assert not _import_and_check_runtime("import devpilot.domain.task")
 
     def test_decision_no_runtime(self) -> None:
-        assert not _import_and_check_runtime(
-            "import devpilot.domain.decision"
-        )
+        assert not _import_and_check_runtime("import devpilot.domain.decision")
 
     def test_result_no_runtime(self) -> None:
-        assert not _import_and_check_runtime(
-            "import devpilot.domain.result"
-        )
+        assert not _import_and_check_runtime("import devpilot.domain.result")
 
     def test_plan_no_runtime(self) -> None:
-        assert not _import_and_check_runtime(
-            "import devpilot.domain.plan"
-        )
+        assert not _import_and_check_runtime("import devpilot.domain.plan")
 
 
 class TestToolsIndependence:
     """Tools must not import any runtime modules."""
 
     def test_registry_no_runtime(self) -> None:
-        assert not _import_and_check_runtime(
-            "import devpilot.tools.registry"
-        )
+        assert not _import_and_check_runtime("import devpilot.tools.registry")
 
     def test_repo_tools_no_runtime(self) -> None:
         assert not _import_and_check_runtime(
@@ -98,14 +86,10 @@ class TestToolsIndependence:
         )
 
     def test_git_tools_no_runtime(self) -> None:
-        assert not _import_and_check_runtime(
-            "from devpilot.tools.git import GitDiff, GitStatus"
-        )
+        assert not _import_and_check_runtime("from devpilot.tools.git import GitDiff, GitStatus")
 
     def test_test_tool_no_runtime(self) -> None:
-        assert not _import_and_check_runtime(
-            "from devpilot.tools.test import RunTests"
-        )
+        assert not _import_and_check_runtime("from devpilot.tools.test import RunTests")
 
 
 class TestWorkspaceIndependence:
@@ -125,32 +109,19 @@ class TestVerifierIndependence:
     """
 
     def test_verifier_no_custom_runtime(self) -> None:
-        runtime_mods = _import_and_check_runtime(
-            "from devpilot.verification import TaskVerifier"
-        )
+        runtime_mods = _import_and_check_runtime("from devpilot.verification import TaskVerifier")
         custom_mods = {m for m in runtime_mods if "custom" in m}
-        assert not custom_mods, (
-            f"Verifier depends on custom runtime: {custom_mods}"
-        )
+        assert not custom_mods, f"Verifier depends on custom runtime: {custom_mods}"
 
 
 class TestEvalRunnerIndependence:
     """Eval runner currently depends on the custom runtime.
 
-    This is a known coupling: ``evals/runner.py`` directly imports
+    The former coupling was: ``evals/runner.py`` directly imports
     ``CustomAgentRunner`` from ``devpilot.runtime.custom.runner``.
     """
 
-    @pytest.mark.xfail(
-        reason="evals/runner.py imports CustomAgentRunner from "
-        "devpilot.runtime.custom.runner (known coupling)",
-        strict=True,
-    )
     def test_eval_runner_no_custom_runtime(self) -> None:
-        runtime_mods = _import_and_check_runtime(
-            "from devpilot.evals.runner import EvalRunner"
-        )
+        runtime_mods = _import_and_check_runtime("from devpilot.evals.runner import EvalRunner")
         custom_mods = {m for m in runtime_mods if "custom" in m}
-        assert not custom_mods, (
-            f"Eval runner depends on custom runtime: {custom_mods}"
-        )
+        assert not custom_mods, f"Eval runner depends on custom runtime: {custom_mods}"

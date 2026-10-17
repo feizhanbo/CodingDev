@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from devpilot.domain.state import DevPilotState, Observation
+from devpilot.domain.state import DevPilotState, Observation, TestRun
 from devpilot.domain.task import DevelopmentTask
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.tools.context import ToolResult
@@ -26,9 +26,7 @@ class StateManager:
     def __init__(self, config: RuntimeConfig) -> None:
         self.config = config
 
-    def create(
-        self, task: DevelopmentTask, run_id: str | None = None
-    ) -> DevPilotState:
+    def create(self, task: DevelopmentTask, run_id: str | None = None) -> DevPilotState:
         """Initialize new DevPilotState for a task."""
         rid = run_id if run_id is not None else f"run_{uuid.uuid4().hex[:8]}"
         return DevPilotState(
@@ -41,9 +39,7 @@ class StateManager:
         """Transition state phase. Validate allowed transitions."""
         allowed = _ALLOWED_TRANSITIONS.get(state.phase, set())
         if new_phase not in allowed:
-            raise ValueError(
-                f"Invalid phase transition: {state.phase} -> {new_phase}"
-            )
+            raise ValueError(f"Invalid phase transition: {state.phase} -> {new_phase}")
         state.phase = new_phase  # type: ignore[assignment]
 
     def add_observation(self, state: DevPilotState, obs: Observation) -> None:
@@ -74,6 +70,19 @@ class StateManager:
             for f in tool_result.data["modified_files"]:
                 if f not in state.modified_files:
                     state.modified_files.append(f)
+        if tool_name == "test.run" and tool_result.data:
+            data = tool_result.data
+            state.test_runs.append(
+                TestRun(
+                    run_id=state.run_id,
+                    exit_code=data.get("exit_code", 0 if tool_result.success else -1),
+                    passed=data.get("passed"),
+                    failed=data.get("failed"),
+                    duration_ms=duration_ms,
+                    summary=str(data.get("summary", summary)),
+                    log_file=data.get("log_file"),
+                )
+            )
         self.add_observation(state, obs)
 
     def request_completion(self, state: DevPilotState) -> None:

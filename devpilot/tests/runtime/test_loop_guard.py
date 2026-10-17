@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from devpilot.domain.decision import AgentDecision, ToolAction
+from devpilot.domain.decision import AgentDecision, FinishIntent, ToolAction
 from devpilot.domain.state import DevPilotState
 from devpilot.domain.task import DevelopmentTask
 from devpilot.runtime.base import RuntimeConfig
@@ -42,7 +42,7 @@ def _make_decision(
     tool: str | None = "repo.read_file", args: dict | None = None
 ) -> AgentDecision:
     if tool is None:
-        return AgentDecision()
+        return AgentDecision(finish=FinishIntent(summary="done", risk="low"))
     return AgentDecision(
         action=ToolAction(tool=tool, arguments=args or {"path": "app.py"})
     )
@@ -108,7 +108,7 @@ class TestCheckDuplicateAction:
 
     def test_no_action_skips_check(self) -> None:
         guard = LoopGuard(RuntimeConfig())
-        guard.check_duplicate_action(AgentDecision())
+        guard.check_duplicate_action(AgentDecision(finish=FinishIntent(summary="done", risk="low")))
         assert len(guard._recent_tool_calls) == 0
 
 

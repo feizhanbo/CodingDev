@@ -68,7 +68,7 @@ class OpenAIClient(LLMClient):
         }
         # Include tool descriptions in the prompt instead of as function
         # calling parameters for maximum provider compatibility.
-        if tools:
+        if tools and not any(m.content.startswith("Available tools:") for m in messages):
             tools_desc = json.dumps(tools, indent=2, ensure_ascii=False)
             kwargs["messages"].append(
                 {
@@ -146,8 +146,8 @@ class OpenAIClient(LLMClient):
         # Try to extract the first JSON object from the text
         start = text.find("{")
         if start == -1:
-            logging.error("No JSON object found in LLM response: %s", raw[:500])
-            raise ValueError(f"No JSON object found in LLM response: {raw[:200]}")
+            logging.error("No JSON object found in LLM response")
+            raise ValueError("No JSON object found in LLM response")
 
         # Find matching closing brace
         depth = 0
@@ -165,7 +165,5 @@ class OpenAIClient(LLMClient):
         try:
             return AgentDecision.model_validate_json(json_str)
         except Exception as exc:
-            logging.error(
-                "Failed to parse AgentDecision from: %s", json_str[:500]
-            )
-            raise ValueError(f"Failed to parse AgentDecision: {exc}") from exc
+            logging.error("Failed to parse AgentDecision (response contents omitted)")
+            raise ValueError("Failed to parse AgentDecision") from exc

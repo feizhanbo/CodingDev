@@ -20,7 +20,8 @@ class ToolContext(BaseModel):
     trusted_root: str | None = None
     artifacts_dir: str | None = None
     test_python: str | None = None
-    test_timeout_seconds: int | None = None
+    test_timeout_seconds: float | None = None
+    deadline: float | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 

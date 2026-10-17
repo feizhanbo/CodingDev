@@ -9,7 +9,6 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -22,6 +21,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from devpilot.security import process_environment
 from devpilot.workspace.sandbox import SandboxWorkspace, _git_init
 
 
@@ -46,6 +46,10 @@ def digest(text: str) -> str:
 
 def resource_root() -> Path:
     return Path(str(files("devpilot.evals")))
+
+
+def packaged_baseline() -> Path:
+    return resource_root() / "benchmark" / "baseline"
 
 
 def load_manifest() -> dict:
@@ -209,12 +213,15 @@ def run_independent_suite(
     timeout: int = 120,
     performance: bool = False,
     trusted_fixtures: bool = True,
+    deadline: float | None = None,
 ) -> SuiteResult:
     """Execute evaluator tests with explicit config outside the candidate tree.
 
     This prevents candidate pytest config/conftest from controlling collection.
     It is process hygiene for a controlled repository, not OS-level isolation.
     """
+    if deadline is not None and time.monotonic() >= deadline:
+        return SuiteResult(status="ERROR", reason="Run deadline exceeded")
     artifacts.mkdir(parents=True, exist_ok=True)
     harness = artifacts / f"harness-{uuid.uuid4().hex}"
     suite = harness / "tests"
@@ -252,12 +259,7 @@ def run_independent_suite(
         "performance" if performance else "not performance",
     ]
     # Explicit paths; do not inherit PYTEST_ADDOPTS or arbitrary PYTHONPATH/plugins.
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key.upper()
-        in {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP", "LANG", "LC_ALL"}
-    }
+    env = process_environment()
     env.update(
         PYTHONPATH=str(candidate.resolve()),
         PYTHONUTF8="1",
@@ -267,6 +269,10 @@ def run_independent_suite(
         USERPROFILE=str(harness),
     )
     started = time.monotonic()
+    if deadline is not None:
+        timeout = min(timeout, deadline - started)
+        if timeout <= 0:
+            return SuiteResult(status="ERROR", reason="Run deadline exceeded")
     try:
         process = subprocess.run(
             command,
@@ -358,6 +364,9 @@ class BenchmarkWorkspace(SandboxWorkspace):
 
     def create(self, run_id: str) -> str:
         repo = Path(self.get_repo_path(run_id))
+        self.check_capacity(
+            sum((self.base_repo / p).stat().st_size for p in load_manifest()["baseline_files"])
+        )
         metadata = prepare_task(self.base_repo, repo, self.issue_id)
         metadata.update(run_id=run_id, workspace_path=str(repo), base_repo=str(self.base_repo))
         self.save_artifact(run_id, "workspace-metadata.json", json.dumps(metadata, indent=2))

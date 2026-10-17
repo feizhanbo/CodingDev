@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,15 @@ class TaskVerifier:
         self.config = config
         self._snapshots: dict[str, Path] = {}
         self.last_results: dict[str, dict] = {}
+        self.deadline: float | None = None
+
+    def _timeout(self) -> float:
+        remaining = self.config.test_timeout_seconds
+        if self.deadline is not None:
+            remaining = min(remaining, self.deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("Run deadline exceeded before verification")
+        return remaining
 
     def bind_snapshot(self, run_id: str, trusted: Path) -> None:
         self._snapshots[run_id] = trusted
@@ -76,7 +86,11 @@ class TaskVerifier:
                 success=False,
                 checks=[
                     {
-                        "name": "test_integrity",
+                        "name": (
+                            "forbidden_files"
+                            if "forbidden" in str(exc).lower()
+                            else "test_integrity"
+                        ),
                         "passed": False,
                         "message": str(exc),
                     }
@@ -130,8 +144,9 @@ class TaskVerifier:
             baseline_tests,
             candidate.parent / "visible",
             python,
-            timeout=self.config.test_timeout_seconds,
+            timeout=self._timeout(),
             trusted_fixtures=False,
+            deadline=self.deadline,
         )
         checks.append(
             {
@@ -149,8 +164,9 @@ class TaskVerifier:
                 new_tests,
                 candidate.parent / "added",
                 python,
-                timeout=self.config.test_timeout_seconds,
+                timeout=self._timeout(),
                 trusted_fixtures=False,
+                deadline=self.deadline,
             )
             checks.append(
                 {

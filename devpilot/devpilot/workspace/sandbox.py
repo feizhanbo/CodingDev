@@ -1,4 +1,5 @@
 """Workspace sandbox for isolated agent execution."""
+
 from __future__ import annotations
 
 import json
@@ -10,11 +11,12 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from devpilot.security import linked, permitted_files, redact
+from devpilot.storage import atomic_write
+
 logger = logging.getLogger(__name__)
 
-_IGNORE_PATTERNS = shutil.ignore_patterns(
-    ".git", "__pycache__", ".venv", "*.db"
-)
+_IGNORE_PATTERNS = shutil.ignore_patterns(".git", "__pycache__", ".venv", "*.db")
 
 
 class SandboxWorkspace:
@@ -26,6 +28,9 @@ class SandboxWorkspace:
         workspace_root: str = "./workspaces",
         runs_root: str = "./runs",
     ) -> None:
+        self.secrets: tuple[str, ...] = ()
+        self.max_bytes = 268435456
+        self.total_max_bytes = 2147483648
         self.base_repo = Path(base_repo_path).resolve()
         self.workspace_root = Path(workspace_root).resolve()
         self.runs_root = Path(runs_root).resolve()
@@ -44,19 +49,17 @@ class SandboxWorkspace:
         workspace_repo = self.workspace_root / run_id / "repo"
         workspace_repo.parent.mkdir(parents=True, exist_ok=True)
 
-        # 6. Detect symlinks in the baseline repo before copying.
-        symlinks = _detect_symlinks(self.base_repo)
-        if symlinks:
-            logger.warning(
-                "Symlinks detected in baseline repo: %s", symlinks
-            )
-
-        # 2. Copy baseline repo contents to the workspace.
-        shutil.copytree(
-            self.base_repo,
-            workspace_repo,
-            ignore=_IGNORE_PATTERNS,
-        )
+        # Enumerate before copying; reject links and never copy credentials.
+        sources = permitted_files(self.base_repo, self.base_repo)
+        self.check_capacity(sum(p.stat().st_size for p in sources))
+        symlinks = []
+        workspace_repo.mkdir()
+        for source in sources:
+            if source.name.endswith((".db", ".pyc", ".pyo")):
+                continue
+            target = workspace_repo / source.relative_to(self.base_repo)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
 
         # 3. Initialize a fresh git repo in the workspace.
         _git_init(workspace_repo)
@@ -80,6 +83,16 @@ class SandboxWorkspace:
         # 7. Return the workspace repo path.
         return str(workspace_repo)
 
+    def check_capacity(self, source_bytes: int) -> None:
+        if source_bytes > self.max_bytes:
+            raise OSError("Workspace exceeds workspace_max_bytes")
+        if self.workspace_root.exists():
+            used = sum(
+                p.stat().st_size for p in permitted_files(self.workspace_root, self.workspace_root)
+            )
+            if used + source_bytes > self.total_max_bytes:
+                raise OSError("Workspaces exceed workspace_total_max_bytes; archive manually")
+
     def get_repo_path(self, run_id: str) -> str:
         """Return the workspace repo path for a run."""
         return str(self.workspace_root / run_id / "repo")
@@ -97,8 +110,11 @@ class SandboxWorkspace:
         Returns the file path.
         """
         artifact_path = self.runs_root / run_id / name
+        if not artifact_path.resolve().is_relative_to(self.runs_root):
+            raise PermissionError("Artifact escapes runs root")
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        artifact_path.write_text(content, encoding="utf-8")
+        safe = content if artifact_path.suffix == ".diff" else redact(content, self.secrets)
+        atomic_write(artifact_path, safe)
         return str(artifact_path)
 
     def destroy(self, run_id: str) -> None:
@@ -107,6 +123,12 @@ class SandboxWorkspace:
         The runs directory is preserved for post-run inspection.
         """
         workspace_dir = self.workspace_root / run_id
+        if (
+            workspace_dir.parent.resolve() != self.workspace_root
+            or workspace_dir.resolve() == self.workspace_root
+            or linked(workspace_dir)
+        ):
+            raise PermissionError("Unsafe workspace removal target")
         if workspace_dir.exists():
             shutil.rmtree(workspace_dir, onexc=_on_rmtree_error)
 
@@ -158,10 +180,10 @@ def _git(repo: Path, *args: str) -> str:
         ["git", *args],
         cwd=str(repo),
         capture_output=True,
-        text=True, encoding="utf-8", errors="replace",
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"git {args} failed in {repo}: {result.stderr.strip()}"
-        )
+        raise RuntimeError(f"git {args} failed in {repo}: {result.stderr.strip()}")
     return result.stdout

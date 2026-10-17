@@ -11,6 +11,7 @@ import pytest
 from devpilot.evals.benchmark import (
     apply_dataset_patch,
     load_manifest,
+    packaged_baseline,
     parse_junit,
     prepare_task,
     resource_root,
@@ -36,7 +37,7 @@ def test_modified_resource_fails_closed(monkeypatch):
 
 
 def test_task_start_is_reproducible_and_excludes_reference(tmp_path):
-    base = Path(__file__).resolve().parents[2] / "shopflow-order-service"
+    base = packaged_baseline()
     first = tmp_path / "first"
     second = tmp_path / "second"
     a = prepare_task(base, first, "DEV-007")

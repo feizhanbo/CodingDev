@@ -7,13 +7,18 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from devpilot.security import forbidden, linked
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
 
 SKIP_DIRS = {
-    ".git", "__pycache__", ".venv", "node_modules",
-    ".pytest_cache", ".ruff_cache",
+    ".git",
+    "__pycache__",
+    ".venv",
+    "node_modules",
+    ".pytest_cache",
+    ".ruff_cache",
 }
 MAX_ENTRIES = 200
 
@@ -56,9 +61,7 @@ constraints:
             return ToolResult(success=False, error=f"Not a directory: {inp.path}")
 
         workspace = Path(ctx.workspace_root)
-        entries = await asyncio.to_thread(
-            _walk_sync, resolved, workspace, inp.depth
-        )
+        entries = await asyncio.to_thread(_walk_sync, resolved, workspace, inp.depth)
         truncated = False
         if len(entries) > MAX_ENTRIES:
             entries = entries[:MAX_ENTRIES]
@@ -70,9 +73,7 @@ constraints:
         )
 
 
-def _walk_sync(
-    root: Path, workspace_root: Path, max_depth: int
-) -> list[dict[str, str]]:
+def _walk_sync(root: Path, workspace_root: Path, max_depth: int) -> list[dict[str, str]]:
     """Depth-limited DFS returning ``{path, type}`` entries."""
     entries: list[dict[str, str]] = []
     stack: list[tuple[Path, int]] = [(root, 0)]
@@ -84,6 +85,8 @@ def _walk_sync(
             continue
         for child in children:
             name = child.name
+            if linked(child) or forbidden(child.relative_to(workspace_root).as_posix()):
+                continue
             try:
                 rel = child.relative_to(workspace_root).as_posix()
             except ValueError:

@@ -65,9 +65,7 @@ class ContextBuilder:
         self.max_recent_observations = 10
         self.max_context_chars = 30000
 
-    def build(
-        self, state: DevPilotState, workspace_path: str
-    ) -> list[LLMMessage]:
+    def build(self, state: DevPilotState, workspace_path: str) -> list[LLMMessage]:
         """Build context messages for LLM based on current state."""
         messages: list[LLMMessage] = []
 
@@ -78,9 +76,7 @@ class ContextBuilder:
         # 2. Tool schemas message
         tool_schemas = tools_to_openai_format(self.registry)
         if tool_schemas:
-            tools_desc = "Available tools:\n" + json.dumps(
-                tool_schemas, indent=2
-            )
+            tools_desc = "Available tools:\n" + json.dumps(tool_schemas, indent=2)
             messages.append(LLMMessage(role="system", content=tools_desc))
 
         # 3. Task message (always complete - never compress)
@@ -94,15 +90,11 @@ class ContextBuilder:
         # 5. Phase-specific instruction
         phase_instruction = self._get_phase_instruction(state.phase)
         if phase_instruction:
-            messages.append(
-                LLMMessage(role="user", content=phase_instruction)
-            )
+            messages.append(LLMMessage(role="user", content=phase_instruction))
 
         # 6. Check context size and compress if needed
         total_chars = sum(len(m.content) for m in messages)
-        if total_chars > self.max_context_chars or len(
-            state.observations
-        ) > 20:
+        if total_chars > self.max_context_chars or len(state.observations) > 20:
             messages = self._compress_context(messages, state)
 
         return messages
@@ -125,33 +117,21 @@ class ContextBuilder:
 
         # Plan (always show latest, full)
         if state.plan:
-            content += (
-                f"\nImplementation Plan (revision {state.plan.revision}):\n"
-            )
+            content += f"\nImplementation Plan (revision {state.plan.revision}):\n"
             for step in state.plan.steps:
-                content += (
-                    f"  {step.id}. [{step.status}] {step.description}\n"
-                )
+                content += f"  {step.id}. [{step.status}] {step.description}\n"
                 if step.verification_hint:
-                    content += (
-                        f"      Verification: {step.verification_hint}\n"
-                    )
+                    content += f"      Verification: {step.verification_hint}\n"
 
         # Runtime Feedback (highest priority after plan)
-        if (
-            state.observations
-            and state.observations[-1].name == "guardrail_feedback"
-        ):
+        if state.observations and state.observations[-1].name == "guardrail_feedback":
             last_feedback = state.observations[-1]
             content += "\n--- RUNTIME FEEDBACK ---\n"
             data = last_feedback.data or {}
             content += f"Reason: {data.get('reason', 'unknown')}\n"
             content += f"Count: {data.get('count', 0)}\n"
             content += f"Phase: {data.get('phase', state.phase)}\n"
-            content += (
-                "Required: "
-                f"{data.get('required_next_behavior', 'take_concrete_action')}\n"
-            )
+            content += f"Required: {data.get('required_next_behavior', 'take_concrete_action')}\n"
             if data.get("message"):
                 content += f"Message: {data['message']}\n"
 
@@ -159,6 +139,8 @@ class ContextBuilder:
         # failure data; supersedes the generic repair block below).
         emitted_test_failure = False
         for obs in reversed(state.observations):
+            if obs.name == "test.run" and obs.success:
+                break
             if obs.name == "test.run" and not obs.success and obs.data:
                 failure = obs.data.get("test_failure")
                 if failure:
@@ -176,22 +158,18 @@ class ContextBuilder:
             )
 
         # Observations: recent full, older compressed
-        recent = state.observations[-self.max_recent_observations:]
+        recent = state.observations[-self.max_recent_observations :]
         older = state.observations[: -self.max_recent_observations]
 
         if older:
-            content += (
-                f"\n--- Progress Summary ({len(older)} earlier steps) ---\n"
-            )
+            content += f"\n--- Progress Summary ({len(older)} earlier steps) ---\n"
             content += self._summarize_observations(older)
             structured = self._build_progress_summary(older)
             if structured:
                 content += structured
 
         if recent:
-            content += (
-                f"\n--- Recent Observations (last {len(recent)}) ---\n"
-            )
+            content += f"\n--- Recent Observations (last {len(recent)}) ---\n"
             for obs in recent:
                 status = "OK" if obs.success else "FAIL"
                 content += (
@@ -205,34 +183,23 @@ class ContextBuilder:
                         content += f"    Result: {data_str}\n"
 
         if state.modified_files:
-            content += (
-                f"\nModified files: {', '.join(state.modified_files)}\n"
-            )
+            content += f"\nModified files: {', '.join(state.modified_files)}\n"
 
         if state.retry_count > 0:
-            content += (
-                f"\nRepair attempts: "
-                f"{state.retry_count}/{self.config.max_test_retries}\n"
-            )
+            content += f"\nRepair attempts: {state.retry_count}/{self.config.max_test_retries}\n"
 
         return content
 
-    def _summarize_observations(
-        self, observations: list[Observation]
-    ) -> str:
+    def _summarize_observations(self, observations: list[Observation]) -> str:
         """Compress older observations into a brief summary."""
         lines = []
         for obs in observations:
             status = "+" if obs.success else "-"
             summary = self._truncate(obs.summary, 100)
-            lines.append(
-                f"  {status} Step {obs.step_id}: {obs.name} - {summary}"
-            )
+            lines.append(f"  {status} Step {obs.step_id}: {obs.name} - {summary}")
         return "\n".join(lines) + "\n"
 
-    def _build_progress_summary(
-        self, observations: list[Observation]
-    ) -> str:
+    def _build_progress_summary(self, observations: list[Observation]) -> str:
         """Build a structured progress summary from older observations.
 
         Extracts explored files, modified files, test results, and
@@ -283,21 +250,14 @@ class ContextBuilder:
                 passed = data.get("passed", 0)
                 failed = data.get("failed", 0)
                 status = "passed" if obs.success else "failed"
-                tests_run.append(
-                    f"  - {name} ({status}, {passed} passed,"
-                    f" {failed} failed)"
-                )
+                tests_run.append(f"  - {name} ({status}, {passed} passed, {failed} failed)")
 
             if not obs.success:
                 error = obs.summary or data.get("error", "")
                 if error:
-                    failures.append(
-                        f"  - {self._truncate(error, 150)}"
-                    )
+                    failures.append(f"  - {self._truncate(error, 150)}")
 
-        if not (
-            explored or modified or tests_run or failures
-        ):
+        if not (explored or modified or tests_run or failures):
             return ""
 
         lines = ["Progress Summary:"]
@@ -307,9 +267,7 @@ class ContextBuilder:
             for p in explored[:15]:
                 lines.append(f"  - {p}")
             if len(explored) > 15:
-                lines.append(
-                    f"  ... (+{len(explored) - 15} more)"
-                )
+                lines.append(f"  ... (+{len(explored) - 15} more)")
 
         if modified:
             lines.append("Modified:")
@@ -353,7 +311,7 @@ class ContextBuilder:
             matches = data.get("matches", [])
             lines = []
             for m in matches[:15]:
-                lines.append(f"{m.get('path','')}:{m.get('line','')} - {m.get('text','')[:80]}")
+                lines.append(f"{m.get('path', '')}:{m.get('line', '')} - {m.get('text', '')[:80]}")
             result = f"[{len(matches)} matches]\n" + "\n".join(lines)
             return self._truncate(result, max_len)
 
@@ -362,7 +320,7 @@ class ContextBuilder:
             path = data.get("path", "")
             start = data.get("start_line", 1)
             return self._truncate(
-                f"[{path} lines {start}-{data.get('end_line','?')}]\n{content_text}",
+                f"[{path} lines {start}-{data.get('end_line', '?')}]\n{content_text}",
                 2000,
             )
 
@@ -373,7 +331,7 @@ class ContextBuilder:
             return f"[{data.get('error', 'unknown')}]"
 
         if name == "code.create_file":
-            if data.get("success"):
+            if obs.success:
                 return f"[created: {data.get('path', '')}]"
             return f"[failed: {data.get('error', '')}]"
 
@@ -455,9 +413,7 @@ class ContextBuilder:
                 "context_compacted",
                 data={
                     "observation_count": len(state.observations),
-                    "max_recent_observations": (
-                        self.max_recent_observations
-                    ),
+                    "max_recent_observations": (self.max_recent_observations),
                 },
             )
         self.max_recent_observations = old_max

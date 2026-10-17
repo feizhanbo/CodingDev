@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -23,6 +26,8 @@ from devpilot.runtime.custom.loop_guard import (
     MaxRetriesExceeded,
 )
 from devpilot.runtime.custom.state_manager import StateManager
+from devpilot.security import permitted_files, redact
+from devpilot.storage import atomic_write
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.registry import ToolRegistry
 from devpilot.tools.repo.file_cache import ReadFileCache
@@ -31,6 +36,10 @@ from devpilot.tracing import MetricsCollector, TraceWriter
 from devpilot.verification import TaskVerifier
 from devpilot.verification.evidence import capture_snapshot
 from devpilot.workspace.sandbox import SandboxWorkspace
+
+
+class BudgetExceeded(GuardrailViolation):
+    """A request or wall-clock limit was exhausted."""
 
 
 class CustomAgentRunner:
@@ -67,7 +76,8 @@ class CustomAgentRunner:
     def _emit(self, event_type: str, data: dict) -> None:
         """Emit a progress event to the optional callback."""
         if self.on_event:
-            self.on_event(event_type, data)
+            safe = json.loads(redact(json.dumps(data), self.sandbox.secrets))
+            self.on_event(event_type, safe)
 
     def _trace(
         self,
@@ -81,9 +91,12 @@ class CustomAgentRunner:
     ) -> None:
         """Write a trace event if trace_writer is available."""
         if self.trace_writer:
-            self.trace_writer.write_event(
-                run_id, step, phase, event, tool, arguments_summary, data
-            )
+            try:
+                self.trace_writer.write_event(
+                    run_id, step, phase, event, tool, arguments_summary, data
+                )
+            except OSError as exc:
+                logging.warning("Trace unavailable: %s", type(exc).__name__)
 
     @staticmethod
     def _enrich_test_failure(tool_result: ToolResult) -> None:
@@ -101,9 +114,7 @@ class CustomAgentRunner:
         log_file = tool_result.data.get("log_file")
         if log_file:
             try:
-                output = Path(log_file).read_text(
-                    encoding="utf-8", errors="replace"
-                )
+                output = Path(log_file).read_text(encoding="utf-8", errors="replace")
             except OSError:
                 output = ""
         try:
@@ -122,20 +133,26 @@ class CustomAgentRunner:
         self.metrics.reset()
         self.loop_guard.reset()
         self.file_cache.clear()
+        self.request_count = 0
+        self.deadline = None
+        self.preparation_ms = 0
 
         # 1. Initialize state
         run_id = f"run_{uuid.uuid4().hex[:8]}"
         state = self.state_manager.create(task, run_id)
         self.metrics.start_time = start_time
-        self._emit("run_started", {
-            "task_id": task.id,
-            "run_id": run_id,
-            "phase": state.phase,
-            "acceptance_criteria_count": len(task.acceptance_criteria),
-        })
-        self._trace(run_id, 0, state.phase, "run_started")
+        self._emit(
+            "run_started",
+            {
+                "task_id": task.id,
+                "run_id": run_id,
+                "phase": state.phase,
+                "acceptance_criteria_count": len(task.acceptance_criteria),
+            },
+        )
 
         try:
+            self._trace(run_id, 0, state.phase, "run_started")
             # 2. Create workspace and freeze trusted evidence before any action.
             workspace_path = self.sandbox.create(run_id)
             trusted = capture_snapshot(
@@ -144,8 +161,19 @@ class CustomAgentRunner:
             if self.verifier:
                 self.verifier.bind_snapshot(run_id, trusted)
 
+            self.preparation_ms = int((time.time() - start_time) * 1000)
+            self._checkpoint(state)
+            self.deadline = time.monotonic() + self.config.max_run_seconds
+            if self.verifier:
+                self.verifier.deadline = self.deadline
+
             # 3. Main loop
             while state.total_steps < self.config.max_steps:
+                self._remaining()
+                self._checkpoint(state)
+                files = permitted_files(Path(workspace_path), Path(workspace_path))
+                if sum(p.stat().st_size for p in files) > self.sandbox.max_bytes:
+                    raise GuardrailViolation("workspace_max_bytes")
                 self.loop_guard.check_max_steps(state)
 
                 messages = self.context_builder.build(state, workspace_path)
@@ -153,15 +181,27 @@ class CustomAgentRunner:
                 decision = None
                 for _attempt in range(3):
                     try:
-                        decision = await self.agent.decide(messages)
+                        if self.request_count >= self.config.max_llm_requests:
+                            raise BudgetExceeded("max_llm_requests")
+                        timeout = min(self.config.llm_timeout_seconds, self._remaining())
+                        self.request_count += 1
+                        decision = await asyncio.wait_for(self.agent.decide(messages), timeout)
+                        decision = AgentDecision.model_validate(decision.model_dump())
+                        if decision.action:
+                            decision.action.tool = self.registry.canonical_name(
+                                decision.action.tool
+                            )
                         break
-                    except (ValueError, Exception) as exc:
+                    except BudgetExceeded:
+                        raise
+                    except Exception as exc:
                         if _attempt == 2:
                             raise
-                        import logging
+
                         logging.warning(
                             "LLM call attempt %d failed: %s, retrying...",
-                            _attempt + 1, str(exc)[:200],
+                            _attempt + 1,
+                            type(exc).__name__,
                         )
                         continue
                     finally:
@@ -170,21 +210,27 @@ class CustomAgentRunner:
                             request.update(attempt=_attempt + 1, step=state.total_steps)
                             self.metrics.record_llm_request(request)
                             self._trace(
-                                run_id, state.total_steps, state.phase, "llm_request",
+                                run_id,
+                                state.total_steps,
+                                state.phase,
+                                "llm_request",
                                 data=request,
                             )
                 decision_type = (
-                    "finish" if decision.finish
-                    else "action" if decision.action
-                    else "plan_update"
+                    "finish" if decision.finish else "action" if decision.action else "plan_update"
                 )
-                self._emit("agent_decision", {
-                    "task_id": task.id,
-                    "phase": state.phase,
-                    "decision_type": decision_type,
-                })
+                self._emit(
+                    "agent_decision",
+                    {
+                        "task_id": task.id,
+                        "phase": state.phase,
+                        "decision_type": decision_type,
+                    },
+                )
                 self._trace(
-                    run_id, state.total_steps, state.phase,
+                    run_id,
+                    state.total_steps,
+                    state.phase,
                     "agent_decision",
                     data={"decision_type": decision_type},
                 )
@@ -197,7 +243,9 @@ class CustomAgentRunner:
                 )
                 if plan_update_feedback:
                     self._trace(
-                        run_id, state.total_steps, state.phase,
+                        run_id,
+                        state.total_steps,
+                        state.phase,
                         "guardrail_triggered",
                         data=plan_update_feedback,
                     )
@@ -208,24 +256,34 @@ class CustomAgentRunner:
 
                     # Run verifier if available
                     if self.verifier:
-                        self._emit("verifier_started", {
-                            "task_id": task.id,
-                            "phase": state.phase,
-                        })
+                        self._emit(
+                            "verifier_started",
+                            {
+                                "task_id": task.id,
+                                "phase": state.phase,
+                            },
+                        )
                         self._trace(
-                            run_id, state.total_steps, state.phase,
+                            run_id,
+                            state.total_steps,
+                            state.phase,
                             "verifier_started",
                         )
                         verification = await self.verifier.verify(
                             task, workspace_path, state, self.registry
                         )
-                        self._emit("verifier_result", {
-                            "task_id": task.id,
-                            "success": verification.success,
-                            "failure_reason": verification.failure_reason,
-                        })
+                        self._emit(
+                            "verifier_result",
+                            {
+                                "task_id": task.id,
+                                "success": verification.success,
+                                "failure_reason": verification.failure_reason,
+                            },
+                        )
                         self._trace(
-                            run_id, state.total_steps, state.phase,
+                            run_id,
+                            state.total_steps,
+                            state.phase,
                             "verifier_result",
                             data=verification.model_dump(),
                         )
@@ -233,27 +291,31 @@ class CustomAgentRunner:
                         if verification.success:
                             # COMPLETED - verifier passed
                             old_phase = state.phase
-                            self.state_manager.transition_phase(
-                                state, "completed"
+                            self.state_manager.transition_phase(state, "completed")
+                            self._emit(
+                                "phase_changed",
+                                {
+                                    "task_id": task.id,
+                                    "from": old_phase,
+                                    "to": "completed",
+                                },
                             )
-                            self._emit("phase_changed", {
-                                "task_id": task.id,
-                                "from": old_phase,
-                                "to": "completed",
-                            })
-                            result = self._build_result(
-                                state, start_time, decision.finish
-                            )
+                            result = self._build_result(state, start_time, decision.finish)
                             self._save_artifacts(run_id, state, result)
-                            self._emit("run_completed", {
-                                "task_id": task.id,
-                                "run_id": run_id,
-                                "status": result.status,
-                                "summary": result.summary,
-                                "total_steps": result.total_steps,
-                            })
+                            self._emit(
+                                "run_completed",
+                                {
+                                    "task_id": task.id,
+                                    "run_id": run_id,
+                                    "status": result.status,
+                                    "summary": result.summary,
+                                    "total_steps": result.total_steps,
+                                },
+                            )
                             self._trace(
-                                run_id, state.total_steps, "completed",
+                                run_id,
+                                state.total_steps,
+                                "completed",
                                 "run_completed",
                             )
                             return result
@@ -263,30 +325,26 @@ class CustomAgentRunner:
                             self.state_manager.increment_retry(state)
 
                             # Check max retries on verifier rejection
-                            if (
-                                state.retry_count
-                                >= self.config.max_test_retries
-                            ):
-                                self.state_manager.transition_phase(
-                                    state, "failed"
-                                )
-                                result = self._build_result(
-                                    state, start_time, None
-                                )
+                            if state.retry_count >= self.config.max_test_retries:
+                                self.state_manager.transition_phase(state, "failed")
+                                result = self._build_result(state, start_time, None)
                                 result.error = (
                                     f"Max retries ({self.config.max_test_retries})"
                                     " exceeded after verifier rejection"
                                 )
-                                self._save_artifacts(
-                                    run_id, state, result
+                                self._save_artifacts(run_id, state, result)
+                                self._emit(
+                                    "run_failed",
+                                    {
+                                        "task_id": task.id,
+                                        "run_id": run_id,
+                                        "error": result.error,
+                                    },
                                 )
-                                self._emit("run_failed", {
-                                    "task_id": task.id,
-                                    "run_id": run_id,
-                                    "error": result.error,
-                                })
                                 self._trace(
-                                    run_id, state.total_steps, "failed",
+                                    run_id,
+                                    state.total_steps,
+                                    "failed",
                                     "run_failed",
                                     data={"reason": result.error},
                                 )
@@ -297,24 +355,19 @@ class CustomAgentRunner:
                                 source="verifier",
                                 name="verification_failed",
                                 success=False,
-                                summary=(
-                                    verification.failure_reason
-                                    or "Verification failed"
-                                ),
+                                summary=(verification.failure_reason or "Verification failed"),
                                 data=verification.model_dump(),
                             )
-                            self.state_manager.add_observation(
-                                state, failure_obs
-                            )
+                            self.state_manager.add_observation(state, failure_obs)
 
                             # Transition back to implementing for repair
                             if state.phase != "implementing":
                                 with suppress(ValueError):
-                                    self.state_manager.transition_phase(
-                                        state, "implementing"
-                                    )
+                                    self.state_manager.transition_phase(state, "implementing")
                             self._trace(
-                                run_id, state.total_steps, state.phase,
+                                run_id,
+                                state.total_steps,
+                                state.phase,
                                 "state_transition",
                                 data={
                                     "reason": "verification_failed",
@@ -325,192 +378,182 @@ class CustomAgentRunner:
                     else:
                         # No verifier - just complete (backward compat)
                         old_phase = state.phase
-                        self.state_manager.transition_phase(
-                            state, "completed"
+                        self.state_manager.transition_phase(state, "completed")
+                        self._emit(
+                            "phase_changed",
+                            {
+                                "task_id": task.id,
+                                "from": old_phase,
+                                "to": "completed",
+                            },
                         )
-                        self._emit("phase_changed", {
-                            "task_id": task.id,
-                            "from": old_phase,
-                            "to": "completed",
-                        })
-                        result = self._build_result(
-                            state, start_time, decision.finish
-                        )
+                        result = self._build_result(state, start_time, decision.finish)
                         self._save_artifacts(run_id, state, result)
-                        self._emit("run_completed", {
-                            "task_id": task.id,
-                            "run_id": run_id,
-                            "status": result.status,
-                            "summary": result.summary,
-                            "total_steps": result.total_steps,
-                        })
+                        self._emit(
+                            "run_completed",
+                            {
+                                "task_id": task.id,
+                                "run_id": run_id,
+                                "status": result.status,
+                                "summary": result.summary,
+                                "total_steps": result.total_steps,
+                            },
+                        )
                         self._trace(
-                            run_id, state.total_steps, "completed",
+                            run_id,
+                            state.total_steps,
+                            "completed",
                             "run_completed",
                         )
                         return result
 
                 # EXECUTE TOOL
                 if decision.action:
-                    self._emit("tool_called", {
-                        "task_id": task.id,
-                        "phase": state.phase,
-                        "tool": decision.action.tool,
-                        "arguments": decision.action.arguments,
-                    })
+                    self._emit(
+                        "tool_called",
+                        {
+                            "task_id": task.id,
+                            "phase": state.phase,
+                            "tool": decision.action.tool,
+                            "arguments": decision.action.arguments,
+                        },
+                    )
                     self._trace(
-                        run_id, state.total_steps, state.phase,
+                        run_id,
+                        state.total_steps,
+                        state.phase,
                         "tool_call",
                         tool=decision.action.tool,
                         arguments_summary=str(decision.action.arguments),
                     )
                     ctx = ToolContext(
-                        workspace_root=workspace_path, run_id=run_id,
+                        workspace_root=workspace_path,
+                        run_id=run_id,
                         artifacts_dir=self.sandbox.get_runs_dir(run_id),
                         trusted_root=str(trusted),
-                        test_timeout_seconds=self.config.test_timeout_seconds,
+                        test_timeout_seconds=min(
+                            self.config.test_timeout_seconds, self._remaining()
+                        ),
+                        deadline=self.deadline,
                     )
                     tool_start = time.time()
 
                     # Check read_file cache before executing the tool
                     tool_name = decision.action.tool
                     is_read_file = tool_name in (
-                        "repo.read_file", "repo_read_file",
+                        "repo.read_file",
+                        "repo_read_file",
                     )
                     cached_result = None
                     if is_read_file:
-                        rel_path = decision.action.arguments.get(
-                            "path", ""
-                        )
-                        full_path = str(
-                            Path(workspace_path) / rel_path
-                        )
+                        rel_path = decision.action.arguments.get("path", "")
+                        full_path = str(Path(workspace_path) / rel_path)
                         cached_result = self.file_cache.get(
                             full_path,
-                            decision.action.arguments.get(
-                                "start_line"
-                            ),
+                            decision.action.arguments.get("start_line"),
                             decision.action.arguments.get("end_line"),
                         )
 
                     if cached_result is not None:
                         tool_result = cached_result
                     else:
-                        tool_result = await self.registry.execute(
-                            decision.action, ctx
-                        )
+                        tool_result = await self.registry.execute(decision.action, ctx)
                         if is_read_file and tool_result.success:
                             self.file_cache.put(
                                 full_path,
-                                decision.action.arguments.get(
-                                    "start_line"
-                                ),
-                                decision.action.arguments.get(
-                                    "end_line"
-                                ),
+                                decision.action.arguments.get("start_line"),
+                                decision.action.arguments.get("end_line"),
                                 tool_result,
                             )
 
-                    tool_duration = int(
-                        (time.time() - tool_start) * 1000
-                    )
+                    tool_duration = int((time.time() - tool_start) * 1000)
 
                     # Invalidate read_file cache for files modified by
                     # patch/create so subsequent reads get fresh content.
                     if (
                         tool_result.success
                         and tool_result.data
-                        and tool_name in (
-                            "code.apply_patch", "code_apply_patch",
-                            "code.create_file", "code_create_file",
+                        and tool_name
+                        in (
+                            "code.apply_patch",
+                            "code_apply_patch",
+                            "code.create_file",
+                            "code_create_file",
                         )
                     ):
-                        for f in tool_result.data.get(
-                            "modified_files", []
-                        ):
-                            self.file_cache.invalidate(
-                                str(Path(workspace_path) / f)
-                            )
+                        for f in tool_result.data.get("modified_files", []):
+                            self.file_cache.invalidate(str(Path(workspace_path) / f))
 
                     # Enrich failed test.run output with structured failure
                     # data before the observation is recorded.
-                    if (
-                        decision.action.tool == "test.run"
-                        and not tool_result.success
-                    ):
+                    if decision.action.tool == "test.run" and not tool_result.success:
                         self._enrich_test_failure(tool_result)
 
                     self.state_manager.apply_tool_result(
-                        state, tool_result, decision.action.tool,
-                        tool_duration
+                        state, tool_result, decision.action.tool, tool_duration
                     )
                     self._maybe_advance_phase(state, decision)
                     self.metrics.record_tool_call(tool_result.success)
-                    if (
-                        tool_result.data
-                        and "modified_files" in tool_result.data
-                    ):
+                    if tool_result.data and "modified_files" in tool_result.data:
                         for f in tool_result.data["modified_files"]:
                             self.metrics.record_modified_file(f)
-                    self._emit("tool_result", {
-                        "task_id": task.id,
-                        "phase": state.phase,
-                        "tool": decision.action.tool,
-                        "success": tool_result.success,
-                        "summary": (
-                            "OK" if tool_result.success
-                            else (tool_result.error or "failed")
-                        ),
-                        "data": tool_result.data,
-                    })
+                    self._emit(
+                        "tool_result",
+                        {
+                            "task_id": task.id,
+                            "phase": state.phase,
+                            "tool": decision.action.tool,
+                            "success": tool_result.success,
+                            "summary": (
+                                "OK" if tool_result.success else (tool_result.error or "failed")
+                            ),
+                            "data": tool_result.data,
+                        },
+                    )
                     self._trace(
-                        run_id, state.total_steps, state.phase,
+                        run_id,
+                        state.total_steps,
+                        state.phase,
                         "tool_result",
                         tool=decision.action.tool,
                         data={
                             "success": tool_result.success,
                             "summary": (
-                                "OK" if tool_result.success
-                                else (tool_result.error or "failed")
+                                "OK" if tool_result.success else (tool_result.error or "failed")
                             ),
                         },
                     )
                     self.loop_guard.inspect(state, decision, tool_result)
 
                     # Check if test.run failed - increment retry
-                    if (
-                        decision.action.tool == "test.run"
-                        and not tool_result.success
-                    ):
+                    if decision.action.tool == "test.run" and not tool_result.success:
                         self.metrics.record_test_retry()
                         self.state_manager.increment_retry(state)
                         state.repair_required = True
                         try:
                             self.loop_guard.check_test_retries(state)
                         except MaxRetriesExceeded:
-                            self.state_manager.transition_phase(
-                                state, "failed"
-                            )
-                            result = self._build_result(
-                                state, start_time, None
-                            )
+                            self.state_manager.transition_phase(state, "failed")
+                            result = self._build_result(state, start_time, None)
                             result.error = "Max retries exceeded"
                             self._save_artifacts(run_id, state, result)
-                            self._emit("run_failed", {
-                                "task_id": task.id,
-                                "run_id": run_id,
-                                "error": result.error,
-                            })
+                            self._emit(
+                                "run_failed",
+                                {
+                                    "task_id": task.id,
+                                    "run_id": run_id,
+                                    "error": result.error,
+                                },
+                            )
                             self._trace(
-                                run_id, state.total_steps, "failed",
+                                run_id,
+                                state.total_steps,
+                                "failed",
                                 "run_failed",
                                 data={"reason": "max_retries"},
                             )
                             return result
-                    elif (
-                        decision.action.tool == "test.run"
-                        and tool_result.success
-                    ):
+                    elif decision.action.tool == "test.run" and tool_result.success:
                         state.repair_required = False
                         self.loop_guard.reset_repair_state()
 
@@ -518,12 +561,16 @@ class CustomAgentRunner:
                 if decision.plan_update:
                     if state.plan is None:
                         self._trace(
-                            run_id, state.total_steps, state.phase,
+                            run_id,
+                            state.total_steps,
+                            state.phase,
                             "plan_created",
                         )
                     else:
                         self._trace(
-                            run_id, state.total_steps, state.phase,
+                            run_id,
+                            state.total_steps,
+                            state.phase,
                             "plan_updated",
                         )
                     state.plan = decision.plan_update
@@ -553,26 +600,25 @@ class CustomAgentRunner:
                         success=False,
                         summary=plan_update_feedback.get(
                             "message",
-                            plan_update_feedback.get(
-                                "reason", "Guard feedback"
-                            ),
+                            plan_update_feedback.get("reason", "Guard feedback"),
                         ),
                         data=plan_update_feedback,
                     )
-                    self.state_manager.add_observation(
-                        state, feedback_obs
-                    )
+                    self.state_manager.add_observation(state, feedback_obs)
 
             # Exceeded max steps
             self.state_manager.transition_phase(state, "failed")
             result = self._build_result(state, start_time, None)
             result.error = f"Max steps ({self.config.max_steps}) exceeded"
             self._save_artifacts(run_id, state, result)
-            self._emit("run_failed", {
-                "task_id": task.id,
-                "run_id": run_id,
-                "error": result.error,
-            })
+            self._emit(
+                "run_failed",
+                {
+                    "task_id": task.id,
+                    "run_id": run_id,
+                    "error": result.error,
+                },
+            )
             self._trace(run_id, state.total_steps, "failed", "run_failed")
             return result
 
@@ -581,18 +627,27 @@ class CustomAgentRunner:
                 self.state_manager.transition_phase(state, "failed")
             result = self._build_result(state, start_time, None)
             result.error = str(e)
+            result.termination_reason = str(e) if isinstance(e, BudgetExceeded) else "guardrail"
             self._save_artifacts(run_id, state, result)
-            self._emit("run_failed", {
-                "task_id": task.id,
-                "run_id": run_id,
-                "error": result.error,
-            })
+            self._emit(
+                "run_failed",
+                {
+                    "task_id": task.id,
+                    "run_id": run_id,
+                    "error": result.error,
+                },
+            )
             self._trace(
-                run_id, state.total_steps, "failed", "run_failed",
+                run_id,
+                state.total_steps,
+                "failed",
+                "run_failed",
                 data={"reason": str(e)},
             )
             self._trace(
-                run_id, state.total_steps, "failed",
+                run_id,
+                state.total_steps,
+                "failed",
                 "guardrail_triggered",
                 data={"violation": str(e)},
             )
@@ -602,21 +657,34 @@ class CustomAgentRunner:
                 self.state_manager.transition_phase(state, "failed")
             result = self._build_result(state, start_time, None)
             result.error = f"Unexpected error: {e}"
+            result.termination_reason = (
+                "run_timeout" if isinstance(e, TimeoutError) else "execution_error"
+            )
             self._save_artifacts(run_id, state, result)
-            self._emit("run_failed", {
-                "task_id": task.id,
-                "run_id": run_id,
-                "error": result.error,
-            })
+            self._emit(
+                "run_failed",
+                {
+                    "task_id": task.id,
+                    "run_id": run_id,
+                    "error": result.error,
+                },
+            )
             self._trace(
-                run_id, state.total_steps, "failed", "run_failed",
+                run_id,
+                state.total_steps,
+                "failed",
+                "run_failed",
                 data={"reason": str(e)},
             )
             return result
 
-    def _maybe_advance_phase(
-        self, state: DevPilotState, decision: AgentDecision
-    ) -> None:
+    def _remaining(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise BudgetExceeded("max_run_seconds")
+        return remaining
+
+    def _maybe_advance_phase(self, state: DevPilotState, decision: AgentDecision) -> None:
         """Auto-advance phase based on tool usage patterns."""
         old_phase = state.phase
         new_phase: str | None = None
@@ -631,14 +699,14 @@ class CustomAgentRunner:
                 new_phase = "planning"
             # If agent starts using code tools, skip to implementing
             elif decision.action and (
-                decision.action.tool.startswith("code.")
-                or decision.action.tool.startswith("code_")
+                decision.action.tool.startswith("code.") or decision.action.tool.startswith("code_")
             ):
                 new_phase = "implementing"
 
         elif state.phase == "planning":
             if (
-                decision.action and (
+                decision.action
+                and (
                     decision.action.tool.startswith("code.")
                     or decision.action.tool.startswith("code_")
                 )
@@ -654,11 +722,14 @@ class CustomAgentRunner:
 
         if new_phase is not None:
             self.state_manager.transition_phase(state, new_phase)
-            self._emit("phase_changed", {
-                "task_id": state.task.id,
-                "from": old_phase,
-                "to": new_phase,
-            })
+            self._emit(
+                "phase_changed",
+                {
+                    "task_id": state.task.id,
+                    "from": old_phase,
+                    "to": new_phase,
+                },
+            )
 
     def _build_result(
         self,
@@ -680,6 +751,12 @@ class CustomAgentRunner:
             risk=finish_intent.risk if finish_intent else None,
             duration_ms=duration_ms,
             error=None if state.phase == "completed" else state.phase,
+            budget={
+                "llm_requests": self.request_count,
+                "max_llm_requests": self.config.max_llm_requests,
+                "max_run_seconds": self.config.max_run_seconds,
+                "preparation_ms": self.preparation_ms,
+            },
         )
 
     def _save_artifacts(
@@ -689,19 +766,44 @@ class CustomAgentRunner:
         result: AgentRunResult,
     ) -> None:
         """Save state.json and result.json to runs directory."""
-        self.sandbox.save_artifact(
-            run_id, "state.json", self.state_manager.serialize(state)
-        )
-        # Sync metrics with final state
+        if result.error:
+            result.error = redact(result.error, self.sandbox.secrets)
         self.metrics.total_steps = state.total_steps
-        for f in state.modified_files:
-            self.metrics.record_modified_file(f)
-        result_data = json.loads(result.model_dump_json(indent=2))
-        result_data["metrics"] = self.metrics.to_dict()
-        self.sandbox.save_artifact(
-            run_id, "llm-requests.json",
-            json.dumps(self.metrics.llm_requests, indent=2),
-        )
-        self.sandbox.save_artifact(
-            run_id, "result.json", json.dumps(result_data, indent=2)
-        )
+        for path in state.modified_files:
+            self.metrics.record_modified_file(path)
+        data = json.loads(result.model_dump_json())
+        data["metrics"] = self.metrics.to_dict()
+        payloads = {
+            "state.json": self.state_manager.serialize(state),
+            "llm-requests.json": json.dumps(self.metrics.llm_requests, indent=2),
+            "result.json": json.dumps(data, indent=2),
+        }
+        for name, content in payloads.items():
+            try:
+                self.sandbox.save_artifact(run_id, name, content)
+            except OSError as exc:
+                result.artifact_errors.append(f"{name}: {type(exc).__name__}")
+        if result.artifact_errors:
+            recovery = Path(tempfile.gettempdir()) / "devpilot-recovery" / f"{run_id}.json"
+            result.recovery_file = str(recovery)
+            try:
+                atomic_write(
+                    recovery,
+                    redact(
+                        json.dumps(
+                            {"result": result.model_dump(), "state": state.model_dump()}, indent=2
+                        ),
+                        self.sandbox.secrets,
+                    ),
+                )
+            except OSError:
+                result.recovery_file = None
+                logging.error("Run artifacts and recovery write failed for %s", run_id)
+
+    def _checkpoint(self, state: DevPilotState) -> None:
+        try:
+            self.sandbox.save_artifact(
+                state.run_id, "state.json", self.state_manager.serialize(state)
+            )
+        except OSError as exc:
+            logging.warning("Checkpoint unavailable: %s", type(exc).__name__)

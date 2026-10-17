@@ -163,6 +163,12 @@ def initialize_components(
         runs_root=ws_config.runs_root,
     )
 
+    sandbox.secrets = (settings.api_key,)
+    sandbox.max_bytes = settings.workspace_max_bytes
+    sandbox.total_max_bytes = settings.workspace_total_max_bytes
+    test_tool = registry.get("test.run")
+    test_tool.secrets = sandbox.secrets
+
     # 4. Runtime components
     state_manager = StateManager(config)
     context_builder = ContextBuilder(config, registry)
@@ -172,6 +178,8 @@ def initialize_components(
     # 5. Verifier and tracing
     verifier = TaskVerifier(config)
     trace_writer = TraceWriter(ws_config.runs_root)
+    trace_writer.secrets = sandbox.secrets
+    context_builder.trace_writer = trace_writer
     metrics = MetricsCollector()
 
     return CustomAgentRunner(
@@ -282,6 +290,9 @@ def _display_summary(result: AgentRunResult, task: DevelopmentTask) -> None:
         f"{result.duration_ms} ms" if result.duration_ms else "N/A",
     )
     table.add_row("Risk Level", result.risk or "N/A")
+    if result.artifact_errors:
+        table.add_row("Artifact errors", ", ".join(result.artifact_errors))
+        table.add_row("Recovery file", result.recovery_file or "unavailable")
     table.add_row("Summary", result.summary or result.error or "N/A")
 
     console.print(table)
@@ -507,7 +518,9 @@ def eval(
     overrides = {"test_python": test_python} if test_python else {}
     settings = Settings(_env_file=env_file, **overrides)
     ws_config = settings.workspace_config()
-    repo_path = base_repo or ws_config.base_repo
+    from devpilot.evals.benchmark import packaged_baseline
+
+    repo_path = base_repo or (ws_config.base_repo if issues_dir else str(packaged_baseline()))
 
     eval_runner = EvalRunner(
         base_repo_path=repo_path,
@@ -544,17 +557,51 @@ def benchmark_check(
     performance: bool = typer.Option(False, help="Also enforce the hardware latency gate"),
 ) -> None:
     """Validate all eight defective starting points and reference fixes without an LLM."""
-    from devpilot.evals.benchmark import validate_benchmark
+    from devpilot.evals.benchmark import packaged_baseline, validate_benchmark
 
     settings = Settings(_env_file=env_file)
     summary = validate_benchmark(
-        Path(base_repo or settings.base_repo).resolve(),
+        Path(base_repo).resolve() if base_repo else packaged_baseline(),
         Path(output).resolve(),
         test_python or settings.test_python,
         performance=performance,
     )
     if not summary["passed"]:
         raise typer.Exit(code=1)
+
+
+@app.command("workspace-report")
+def workspace_report(retention_days: int = typer.Option(7, min=1)) -> None:
+    """Read-only capacity report; retain run evidence and never delete files."""
+    import time
+
+    from devpilot.security import permitted_files
+
+    settings = Settings()
+    root = Path(settings.workspace_root).resolve()
+    entries = []
+    for folder in sorted(root.iterdir()) if root.exists() else []:
+        if not folder.is_dir() or folder.is_symlink() or folder.is_junction():
+            continue
+        size = sum(p.stat().st_size for p in permitted_files(folder, root))
+        result = Path(settings.runs_root) / folder.name / "result.json"
+        closed = result.is_file()
+        old = time.time() - folder.stat().st_mtime > retention_days * 86400
+        entries.append(
+            {
+                "run_id": folder.name,
+                "logical_bytes": size,
+                "manual_archive_candidate": closed and old,
+            }
+        )
+    console.print_json(
+        data={
+            "execution_mode": "trusted_local",
+            "retention": "keep_all",
+            "total_limit_bytes": settings.workspace_total_max_bytes,
+            "workspaces": entries,
+        }
+    )
 
 
 if __name__ == "__main__":

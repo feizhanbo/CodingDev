@@ -14,7 +14,7 @@ class AgentRunResult(BaseModel):
 
     run_id: str
     task_id: str
-    status: Literal['completed', 'failed']
+    status: Literal["completed", "failed"]
     phase: str
     total_steps: int
     modified_files: list[str] = []
@@ -24,3 +24,8 @@ class AgentRunResult(BaseModel):
     risk: str | None = None
     duration_ms: int | None = None
     error: str | None = None
+    termination_reason: str | None = None
+    execution_mode: str = "trusted_local"
+    budget: dict = {}
+    artifact_errors: list[str] = []
+    recovery_file: str | None = None

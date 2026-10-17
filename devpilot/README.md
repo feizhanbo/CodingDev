@@ -205,3 +205,37 @@ On POSIX use `../shopflow-order-service/.venv/bin/python`. The equivalent enviro
 Evaluation code and resources now live in `devpilot.evals` and ship in the wheel. `eval` resolves default issues from package resources; `--issues-dir` and `--hidden-tests-dir` override them. Python callers should import `devpilot.evals.runner`, replacing `evals.runner`. `inspect` and `diff` use `DEVPILOT_RUNS_ROOT`, and diff fallback uses `DEVPILOT_WORKSPACE_ROOT`. Each test invocation gets its own log under the run artifact directory.
 
 Hardening is in progress. The current local subprocess backend does not enforce network isolation; the network setting is not yet an isolation guarantee. Fake evaluation still requires the planned smoke/capability separation and must not be interpreted as Agent capability evidence. See `../docs/v1-hardening-progress.md` for verified work and remaining gates.
+# Trusted local execution and P1 hardening
+
+DevPilot runs candidate Python with the current user's host permissions. The execution mode is
+`trusted_local`: environment filtering and file policy are **not** an OS sandbox or enforced network
+isolation. Use trusted repositories only. The legacy `DEVPILOT_NETWORK_ACCESS` setting does not enforce
+network restrictions.
+
+Runtime defaults now include `DEVPILOT_MAX_LLM_REQUESTS=90`, `DEVPILOT_LLM_TIMEOUT_SECONDS=120`, and
+`DEVPILOT_MAX_RUN_SECONDS=1800`. Every model attempt, including retries and invalid responses, consumes
+the request budget. The execution deadline starts after synchronous workspace preparation. Results
+record budget usage and an optional `termination_reason`; token usage remains unknown when the
+provider does not supply it.
+
+Exactly one decision branch is required: `action`, `plan_update`, or `finish`. Plans and actions must
+be sent in separate responses. Dot and underscore tool aliases share the same runtime accounting.
+
+Built-in `eval` and `benchmark-check` use the packaged v1.1 baseline, independent of the evolving
+ShopFlow checkout. Explicit `--base-repo` overrides are still hash checked and fail on drift. Ordinary
+`run` and custom issue directories continue to use the configured target repository.
+
+Workspaces exclude forbidden credential paths and reject links. Search uses literal matching in both
+rg and Python implementations. This does not detect all unknown secrets. Tests inherit only a small
+environment allowlist. Frozen evidence and exported diffs retain their actual code contents.
+
+State is checkpointed between decisions and single JSON files use atomic replacement. Failed artifact
+writes are reported in `artifact_errors`; when possible, a redacted recovery record is saved under the
+system temporary directory (`recovery_file`). This is diagnostic recovery, not automatic task resume.
+
+Logical workspace limits default to 256 MiB per run and 2 GiB in total, configurable through
+`DEVPILOT_WORKSPACE_MAX_BYTES` and `DEVPILOT_WORKSPACE_TOTAL_MAX_BYTES`. Git objects and run artifacts
+are outside these logical byte totals. `devpilot workspace-report --retention-days 7` is read-only and
+lists older completed runs for manual archiving. Existing workspaces and evidence are never
+automatically deleted. Disk usage of logs, snapshots and verification copies still requires monitoring.
+

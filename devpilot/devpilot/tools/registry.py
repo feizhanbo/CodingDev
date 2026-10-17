@@ -37,6 +37,10 @@ class ToolRegistry:
         alt_name = name.replace("_", ".", 1) if "_" in name else name
         return self._tools.get(alt_name)
 
+    def canonical_name(self, name: str) -> str:
+        tool = self.get(name)
+        return tool.name if tool else name
+
     async def execute(self, action: ToolAction, ctx: ToolContext) -> ToolResult:
         """Validate *action*, dispatch to the target tool, handle errors.
 

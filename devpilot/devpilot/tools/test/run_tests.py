@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from devpilot.security import process_environment, redact
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
@@ -53,6 +54,7 @@ constraints:
         timeout_seconds: int = 120,
         runs_root: str = "./runs",
     ) -> None:
+        self.secrets: tuple[str, ...] = ()
         self.python_executable = python_executable or sys.executable
         self.timeout_seconds = timeout_seconds
         self.runs_root = Path(runs_root).resolve()
@@ -90,6 +92,7 @@ constraints:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=ctx.workspace_root,
+                env=process_environment(),
             )
         except (FileNotFoundError, OSError) as exc:
             return ToolResult(
@@ -109,8 +112,10 @@ constraints:
             stdout, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=ctx.test_timeout_seconds or self.timeout_seconds
             )
-        except TimeoutError:
+        except (TimeoutError, asyncio.CancelledError) as exc:
             await _kill_and_wait(proc)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             output = "Test timed out; no output captured."
             _write_log(log_path, output)
             elapsed = int((time.monotonic() - start) * 1000)
@@ -129,7 +134,7 @@ constraints:
             )
 
         elapsed = int((time.monotonic() - start) * 1000)
-        output = stdout.decode(errors="replace")
+        output = redact(stdout.decode(errors="replace"), self.secrets)
         _write_log(log_path, output)
 
         evidence = parse_junit(report_path, proc.returncode)

@@ -14,6 +14,8 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from devpilot.security import forbidden
+
 CONFIG_NAMES = {
     "conftest.py",
     "pytest.ini",
@@ -49,6 +51,8 @@ def inventory(root: Path) -> dict[str, str]:
             if name.endswith((".pyc", ".pyo", ".db", ".db-journal")):
                 continue
             path = Path(directory) / name
+            if forbidden(path.relative_to(root).as_posix()):
+                raise PermissionError(f"Forbidden workspace file: {path.relative_to(root)}")
             hashes[path.relative_to(root).as_posix()] = hashlib.sha256(
                 path.read_bytes()
             ).hexdigest()

@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -25,9 +26,16 @@ from devpilot.runtime.custom.loop_guard import (
     LoopGuard,
     MaxRetriesExceeded,
 )
+from devpilot.runtime.custom.recovery import (
+    Checkpoint,
+    recovery_inventory,
+    restore_fields,
+    runtime_identity,
+    validate_run_id,
+)
 from devpilot.runtime.custom.state_manager import StateManager
 from devpilot.security import permitted_files, redact
-from devpilot.storage import atomic_write
+from devpilot.storage import ArtifactQuotaExceeded, RunLock, atomic_write, tree_bytes
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.registry import ToolRegistry
 from devpilot.tools.repo.file_cache import ReadFileCache
@@ -72,12 +80,16 @@ class CustomAgentRunner:
         self.trace_writer = trace_writer
         self.metrics = metrics or MetricsCollector()
         self.file_cache = file_cache or ReadFileCache()
+        self.purpose = "ordinary"
 
     def _emit(self, event_type: str, data: dict) -> None:
         """Emit a progress event to the optional callback."""
         if self.on_event:
             safe = json.loads(redact(json.dumps(data), self.sandbox.secrets))
-            self.on_event(event_type, safe)
+            try:
+                self.on_event(event_type, safe)
+            except Exception as exc:  # noqa: BLE001 - display errors must not lose artifacts
+                logging.warning("Progress callback failed: %s", type(exc).__name__)
 
     def _trace(
         self,
@@ -128,8 +140,54 @@ class CustomAgentRunner:
             }
 
     async def run(self, task: DevelopmentTask) -> AgentRunResult:
-        """Execute the agent loop for a development task."""
-        start_time = time.time()
+        """Execute a new run under an OS lock that also protects resume."""
+        run_id = f"run_{uuid.uuid4().hex[:8]}"
+        with RunLock(Path(self.sandbox.get_runs_dir(run_id)) / ".run.lock"):
+            return await self._run(task, run_id)
+
+    async def resume(self, run_id: str) -> AgentRunResult:
+        """Resume a compatible interrupted model/ready stage, without resetting budgets."""
+        validate_run_id(run_id)
+        directory = Path(self.sandbox.get_runs_dir(run_id))
+        workspace = Path(self.sandbox.get_repo_path(run_id))
+        if (
+            directory.resolve() != directory
+            or directory.resolve().parent != self.sandbox.runs_root
+            or not directory.is_dir()
+        ):
+            raise ValueError("Run directory missing or outside runs root")
+        if workspace.resolve() != workspace or workspace.parent.is_symlink():
+            raise ValueError("Linked workspace cannot be resumed")
+        with RunLock(directory / ".run.lock"):
+            checkpoint = Checkpoint.model_validate_json((directory / "checkpoint.json").read_text())
+            if checkpoint.run_id != run_id or checkpoint.state.run_id != run_id:
+                raise ValueError("Checkpoint run ID mismatch")
+            if checkpoint.stage not in {"ready", "llm_inflight"}:
+                raise ValueError(
+                    "Cannot resume terminal or in-flight tool/verifier; inspect manually"
+                )
+            if (directory / "result.json").exists() or checkpoint.state.phase in {
+                "completed",
+                "failed",
+            }:
+                raise ValueError("Terminal runs cannot be resumed")
+            if checkpoint.purpose != "ordinary":
+                raise ValueError("Evaluation runs require a fresh evaluation, not ordinary resume")
+            if checkpoint.runtime != asdict(self.config) or checkpoint.identity != runtime_identity(
+                self
+            ):
+                raise ValueError("Runtime/config/provider changed; resume refused")
+            if recovery_inventory(workspace) != checkpoint.workspace:
+                raise ValueError("Workspace changed since checkpoint")
+            if recovery_inventory(directory / "trusted") != checkpoint.trusted:
+                raise ValueError("Trusted evidence changed since checkpoint")
+            return await self._run(checkpoint.state.task, run_id, checkpoint)
+
+    async def _run(
+        self, task: DevelopmentTask, run_id: str, recovery: Checkpoint | None = None
+    ) -> AgentRunResult:
+        """Execute or restore the loop; synchronous preparation is measured separately."""
+        start_time = recovery.started_at if recovery else time.time()
         self.metrics.reset()
         self.loop_guard.reset()
         self.file_cache.clear()
@@ -137,9 +195,12 @@ class CustomAgentRunner:
         self.deadline = None
         self.preparation_ms = 0
 
+        self.attempts_in_turn = 0
+        self.started_at = start_time
+        self.deadline_at = 0.0
+        self.identity = ""
         # 1. Initialize state
-        run_id = f"run_{uuid.uuid4().hex[:8]}"
-        state = self.state_manager.create(task, run_id)
+        state = recovery.state if recovery else self.state_manager.create(task, run_id)
         self.metrics.start_time = start_time
         self._emit(
             "run_started",
@@ -154,16 +215,37 @@ class CustomAgentRunner:
         try:
             self._trace(run_id, 0, state.phase, "run_started")
             # 2. Create workspace and freeze trusted evidence before any action.
-            workspace_path = self.sandbox.create(run_id)
-            trusted = capture_snapshot(
-                Path(workspace_path), Path(self.sandbox.get_runs_dir(run_id))
-            )
+            self.identity = runtime_identity(self)
+            if recovery:
+                workspace_path = self.sandbox.get_repo_path(run_id)
+                trusted = Path(self.sandbox.get_runs_dir(run_id)) / "trusted"
+                self.request_count = recovery.request_count
+                self.attempts_in_turn = recovery.attempts_in_turn
+                self.preparation_ms = recovery.preparation_ms
+                self.deadline_at = recovery.deadline_at
+                self.deadline = time.monotonic() + min(
+                    recovery.remaining_seconds, recovery.deadline_at - time.time()
+                )
+                restore_fields(self.metrics, recovery.metrics)
+                restore_fields(self.loop_guard, recovery.guard)
+                # An interrupted model attempt may have been billed; usage is unknown.
+                while len(self.metrics.llm_requests) < self.request_count:
+                    self.metrics.record_llm_request(
+                        {"status": "interrupted", "latency_ms": 0, "total_tokens": None}
+                    )
+                self._trace(run_id, state.total_steps, state.phase, "run_resumed")
+            else:
+                self.sandbox.check_artifacts(run_id)
+                workspace_path = self.sandbox.create(run_id)
+                self.sandbox.check_artifacts(run_id, tree_bytes(Path(workspace_path)))
+                trusted = capture_snapshot(
+                    Path(workspace_path), Path(self.sandbox.get_runs_dir(run_id))
+                )
+                self.preparation_ms = int((time.time() - start_time) * 1000)
+                self.deadline = time.monotonic() + self.config.max_run_seconds
+                self.deadline_at = time.time() + self.config.max_run_seconds
             if self.verifier:
                 self.verifier.bind_snapshot(run_id, trusted)
-
-            self.preparation_ms = int((time.time() - start_time) * 1000)
-            self._checkpoint(state)
-            self.deadline = time.monotonic() + self.config.max_run_seconds
             if self.verifier:
                 self.verifier.deadline = self.deadline
 
@@ -171,6 +253,7 @@ class CustomAgentRunner:
             while state.total_steps < self.config.max_steps:
                 self._remaining()
                 self._checkpoint(state)
+                self.sandbox.check_artifacts(run_id)
                 files = permitted_files(Path(workspace_path), Path(workspace_path))
                 if sum(p.stat().st_size for p in files) > self.sandbox.max_bytes:
                     raise GuardrailViolation("workspace_max_bytes")
@@ -179,12 +262,18 @@ class CustomAgentRunner:
                 messages = self.context_builder.build(state, workspace_path)
                 # Retry LLM call on empty/error responses
                 decision = None
-                for _attempt in range(3):
+                if self.attempts_in_turn >= 3:
+                    raise BudgetExceeded("interrupted_model_retries_exhausted")
+                for _attempt in range(self.attempts_in_turn, 3):
                     try:
                         if self.request_count >= self.config.max_llm_requests:
                             raise BudgetExceeded("max_llm_requests")
-                        timeout = min(self.config.llm_timeout_seconds, self._remaining())
+                        self._remaining()
                         self.request_count += 1
+                        self.attempts_in_turn = _attempt + 1
+                        self.agent.last_request = None
+                        self._checkpoint(state, "llm_inflight")
+                        timeout = min(self.config.llm_timeout_seconds, self._remaining())
                         decision = await asyncio.wait_for(self.agent.decide(messages), timeout)
                         decision = AgentDecision.model_validate(decision.model_dump())
                         if decision.action:
@@ -269,9 +358,19 @@ class CustomAgentRunner:
                             state.phase,
                             "verifier_started",
                         )
-                        verification = await self.verifier.verify(
-                            task, workspace_path, state, self.registry
+                        self.sandbox.check_artifacts(
+                            run_id,
+                            2 * tree_bytes(trusted / "baseline")
+                            + 3 * sum(p.stat().st_size for p in files)
+                            + 2 * self.config.max_test_output_bytes,
                         )
+                        self._checkpoint(state, "verifier_inflight")
+                        self._remaining()
+                        verification = await asyncio.wait_for(
+                            self.verifier.verify(task, workspace_path, state, self.registry),
+                            self._remaining(),
+                        )
+                        self._remaining()
                         self._emit(
                             "verifier_result",
                             {
@@ -374,6 +473,7 @@ class CustomAgentRunner:
                                     "failure": verification.failure_reason,
                                 },
                             )
+                            self.attempts_in_turn = 0
                             continue
                     else:
                         # No verifier - just complete (backward compat)
@@ -457,7 +557,12 @@ class CustomAgentRunner:
                     if cached_result is not None:
                         tool_result = cached_result
                     else:
-                        tool_result = await self.registry.execute(decision.action, ctx)
+                        if tool_name == "test.run":
+                            self.sandbox.check_artifacts(run_id, self.config.max_test_output_bytes)
+                        self._checkpoint(state, "tool_inflight")
+                        tool_result = await asyncio.wait_for(
+                            self.registry.execute(decision.action, ctx), self._remaining()
+                        )
                         if is_read_file and tool_result.success:
                             self.file_cache.put(
                                 full_path,
@@ -466,6 +571,7 @@ class CustomAgentRunner:
                                 tool_result,
                             )
 
+                    self._remaining()
                     tool_duration = int((time.time() - tool_start) * 1000)
 
                     # Invalidate read_file cache for files modified by
@@ -606,6 +712,9 @@ class CustomAgentRunner:
                     )
                     self.state_manager.add_observation(state, feedback_obs)
 
+                self.attempts_in_turn = 0
+                self._checkpoint(state)
+
             # Exceeded max steps
             self.state_manager.transition_phase(state, "failed")
             result = self._build_result(state, start_time, None)
@@ -658,7 +767,11 @@ class CustomAgentRunner:
             result = self._build_result(state, start_time, None)
             result.error = f"Unexpected error: {e}"
             result.termination_reason = (
-                "run_timeout" if isinstance(e, TimeoutError) else "execution_error"
+                "artifact_quota"
+                if isinstance(e, ArtifactQuotaExceeded)
+                else "run_timeout"
+                if isinstance(e, TimeoutError)
+                else "execution_error"
             )
             self._save_artifacts(run_id, state, result)
             self._emit(
@@ -768,21 +881,30 @@ class CustomAgentRunner:
         """Save state.json and result.json to runs directory."""
         if result.error:
             result.error = redact(result.error, self.sandbox.secrets)
+        if result.summary:
+            result.summary = redact(result.summary, self.sandbox.secrets)
         self.metrics.total_steps = state.total_steps
         for path in state.modified_files:
             self.metrics.record_modified_file(path)
-        data = json.loads(result.model_dump_json())
-        data["metrics"] = self.metrics.to_dict()
+        try:
+            self._checkpoint(state, "terminal")
+        except OSError as exc:
+            result.artifact_errors.append(f"checkpoint.json: {type(exc).__name__}")
         payloads = {
             "state.json": self.state_manager.serialize(state),
             "llm-requests.json": json.dumps(self.metrics.llm_requests, indent=2),
-            "result.json": json.dumps(data, indent=2),
         }
         for name, content in payloads.items():
             try:
                 self.sandbox.save_artifact(run_id, name, content)
             except OSError as exc:
                 result.artifact_errors.append(f"{name}: {type(exc).__name__}")
+        try:
+            data = json.loads(result.model_dump_json())
+            data["metrics"] = self.metrics.to_dict()
+            self.sandbox.save_artifact(run_id, "result.json", json.dumps(data, indent=2))
+        except OSError as exc:
+            result.artifact_errors.append(f"result.json: {type(exc).__name__}")
         if result.artifact_errors:
             recovery = Path(tempfile.gettempdir()) / "devpilot-recovery" / f"{run_id}.json"
             result.recovery_file = str(recovery)
@@ -800,10 +922,31 @@ class CustomAgentRunner:
                 result.recovery_file = None
                 logging.error("Run artifacts and recovery write failed for %s", run_id)
 
-    def _checkpoint(self, state: DevPilotState) -> None:
-        try:
-            self.sandbox.save_artifact(
-                state.run_id, "state.json", self.state_manager.serialize(state)
-            )
-        except OSError as exc:
-            logging.warning("Checkpoint unavailable: %s", type(exc).__name__)
+    def _checkpoint(self, state: DevPilotState, stage: str = "ready") -> None:
+        # Atomic authoritative state; failure prevents dispatch of another external action.
+        directory = Path(self.sandbox.get_runs_dir(state.run_id))
+        workspace = Path(self.sandbox.get_repo_path(state.run_id))
+        checkpoint = Checkpoint(
+            run_id=state.run_id,
+            stage=stage,
+            state=state,
+            request_count=self.request_count,
+            attempts_in_turn=self.attempts_in_turn,
+            deadline_at=self.deadline_at,
+            remaining_seconds=max(0, self.deadline - time.monotonic()) if self.deadline else 0,
+            started_at=self.started_at,
+            preparation_ms=self.preparation_ms,
+            identity=self.identity,
+            runtime=asdict(self.config),
+            guard={k: v for k, v in vars(self.loop_guard).items() if k != "config"},
+            metrics=dict(vars(self.metrics)),
+            workspace=recovery_inventory(workspace) if workspace.is_dir() else {},
+            trusted=recovery_inventory(directory / "trusted")
+            if (directory / "trusted").is_dir()
+            else {},
+            purpose=self.purpose,
+        )
+        self.sandbox.save_artifact(
+            state.run_id, "checkpoint.json", checkpoint.model_dump_json(indent=2)
+        )
+        self.sandbox.save_artifact(state.run_id, "state.json", self.state_manager.serialize(state))

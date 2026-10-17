@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -19,7 +20,9 @@ from devpilot.domain.state import DevPilotState
 from devpilot.domain.task import DevelopmentTask
 from devpilot.evals.metrics import collect_metrics
 from devpilot.runtime.base import AgentRunner, RuntimeConfig
+from devpilot.security import redact
 from devpilot.settings import Settings
+from devpilot.storage import atomic_write, tree_bytes
 from devpilot.workspace.sandbox import SandboxWorkspace
 
 _PASSED_RE = re.compile(r"(\d+) passed")
@@ -51,6 +54,8 @@ class EvalResult(BaseModel):
     token_usage: int | None = None
     known_tokens: int = 0
     llm_requests: int = 0
+    artifact_errors: list[str] = Field(default_factory=list)
+    recovery_file: str | None = None
 
 
 class EvalRunner:
@@ -115,6 +120,9 @@ class EvalRunner:
             runner.sandbox.secrets = (self.settings.api_key,)
             runner.sandbox.max_bytes = self.settings.workspace_max_bytes
             runner.sandbox.total_max_bytes = self.settings.workspace_total_max_bytes
+            runner.sandbox.artifacts_max_bytes = self.settings.run_artifacts_max_bytes
+            runner.sandbox.artifacts_total_max_bytes = self.settings.runs_total_max_bytes
+            runner.purpose = "evaluation"
             run_result = await runner.run(task)
             evidence = runner.verifier.last_results.get(run_result.run_id, {})
             visible = evidence.get("visible", {})
@@ -168,29 +176,50 @@ class EvalRunner:
                 known_tokens=runner.metrics.tokens_used if hasattr(runner, "metrics") else 0,
                 llm_requests=run_result.budget.get("llm_requests", 0),
                 verification={"visible": visible, "hidden": hidden, "added": evidence.get("added")},
+                artifact_errors=run_result.artifact_errors,
+                recovery_file=run_result.recovery_file,
             )
-            runner.sandbox.save_artifact(
-                run_result.run_id, "eval_result.json", evaluation.model_dump_json(indent=2)
-            )
+            self._persist_evaluation(evaluation, runner.sandbox)
             return evaluation
         except Exception as exc:
             evaluation = EvalResult(
                 issue_id=issue_id,
-                run_id=fallback_id,
+                run_id=run_result.run_id if "run_result" in locals() else fallback_id,
                 evaluation_mode=mode,
                 evaluation_status="ERROR",
-                evaluation_reason=str(exc),
-                error=str(exc),
+                evaluation_reason=redact(str(exc), (self.settings.api_key,)),
+                error=redact(str(exc), (self.settings.api_key,)),
                 task_success=None,
                 visible_test_pass_rate=None,
                 agent_status="failed",
             )
-            directory = Path(self.settings.runs_root) / fallback_id
-            directory.mkdir(parents=True, exist_ok=True)
-            (directory / "eval_result.json").write_text(
-                evaluation.model_dump_json(indent=2), encoding="utf-8"
+            sandbox = (
+                runner.sandbox
+                if "runner" in locals()
+                else SandboxWorkspace(str(self.base_repo), runs_root=self.settings.runs_root)
             )
+            self._persist_evaluation(evaluation, sandbox)
             return evaluation
+
+    def _persist_evaluation(self, evaluation: EvalResult, sandbox: SandboxWorkspace) -> None:
+        """Keep an explicit error and redacted diagnostic fallback after disk failure."""
+        try:
+            sandbox.save_artifact(
+                evaluation.run_id, "eval_result.json", evaluation.model_dump_json(indent=2)
+            )
+        except OSError as exc:
+            evaluation.artifact_errors.append(f"eval_result.json: {type(exc).__name__}")
+            path = (
+                Path(tempfile.gettempdir()) / "devpilot-recovery" / f"eval-{evaluation.run_id}.json"
+            )
+            evaluation.recovery_file = str(path)
+            try:
+                atomic_write(
+                    path, redact(evaluation.model_dump_json(indent=2), (self.settings.api_key,))
+                )
+            except OSError:
+                evaluation.artifact_errors.append("recovery_file: OSError")
+                evaluation.recovery_file = None
 
     async def run_all(
         self,
@@ -280,6 +309,9 @@ class EvalRunner:
                 "pass_rate": None,
                 "details": "Run deadline exceeded before hidden tests",
             }
+        sandbox.check_artifacts(
+            run_id, tree_bytes(self.hidden_tests_dir / issue_id) + self.config.max_test_output_bytes
+        )
         suite = run_independent_suite(
             Path(sandbox.get_repo_path(run_id)),
             self.hidden_tests_dir / issue_id,
@@ -287,6 +319,8 @@ class EvalRunner:
             self.settings.test_python,
             timeout=self.config.test_timeout_seconds,
             deadline=getattr(self, "deadline", None),
+            output_limit=self.config.max_test_output_bytes,
+            secrets=(self.settings.api_key,),
             trusted_fixtures=self.hidden_tests_dir.resolve()
             == (resource_root() / "hidden_tests").resolve(),
         )

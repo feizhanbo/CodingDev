@@ -75,7 +75,8 @@ async def test_run_deadline_stops_further_attempts(tmp_path):
     runner.agent.decide = slow
     result = await runner.run(_make_task())
     assert result.termination_reason == "max_run_seconds"
-    assert result.budget["llm_requests"] == 1
+    # Durable checkpoint IO may consume this intentionally tiny deadline before dispatch.
+    assert result.budget["llm_requests"] <= 1
 
 
 async def test_alias_has_canonical_observation(tmp_path):

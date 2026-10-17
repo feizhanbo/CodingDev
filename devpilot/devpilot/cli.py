@@ -87,7 +87,12 @@ def register_all_tools(registry: ToolRegistry, settings: Settings | None = None)
     registry.register(CreateFile())
     settings = settings or Settings()
     registry.register(
-        RunTests(settings.test_python, settings.test_timeout_seconds, settings.runs_root)
+        RunTests(
+            settings.test_python,
+            settings.test_timeout_seconds,
+            settings.runs_root,
+            output_limit_bytes=settings.max_test_output_bytes,
+        )
     )
     registry.register(GitDiff())
     registry.register(GitStatus())
@@ -166,6 +171,8 @@ def initialize_components(
     sandbox.secrets = (settings.api_key,)
     sandbox.max_bytes = settings.workspace_max_bytes
     sandbox.total_max_bytes = settings.workspace_total_max_bytes
+    sandbox.artifacts_max_bytes = settings.run_artifacts_max_bytes
+    sandbox.artifacts_total_max_bytes = settings.runs_total_max_bytes
     test_tool = registry.get("test.run")
     test_tool.secrets = sandbox.secrets
 
@@ -335,6 +342,31 @@ def run(
     _display_summary(result, task)
 
     # 5. Exit code
+    if result.status != "completed":
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def resume(
+    run_id: str = typer.Argument(..., help="Interrupted ordinary run ID"),
+    test_python: str | None = typer.Option(None, help="Original target pytest interpreter"),
+    env_file: str = typer.Option(".env", help="Original configuration dotenv file"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Resume a compatible checkpoint using its original budget and frozen evidence."""
+    overrides = {"test_python": test_python} if test_python else {}
+    settings = Settings(_env_file=env_file, **overrides)
+    runner = initialize_components(settings=settings, on_event=_make_rich_callback(run_id, verbose))
+    try:
+        result = asyncio.run(runner.resume(run_id))
+    except (OSError, ValueError, RuntimeError) as exc:
+        from devpilot.security import redact
+
+        console.print(redact(str(exc), (settings.api_key,)), markup=False)
+        raise typer.Exit(code=1) from None
+    from devpilot.security import redact
+
+    console.print_json(json=redact(result.model_dump_json(), (settings.api_key,)))
     if result.status != "completed":
         raise typer.Exit(code=1)
 
@@ -576,6 +608,7 @@ def workspace_report(retention_days: int = typer.Option(7, min=1)) -> None:
     import time
 
     from devpilot.security import permitted_files
+    from devpilot.storage import tree_bytes
 
     settings = Settings()
     root = Path(settings.workspace_root).resolve()
@@ -594,12 +627,28 @@ def workspace_report(retention_days: int = typer.Option(7, min=1)) -> None:
                 "manual_archive_candidate": closed and old,
             }
         )
+    artifacts = []
+    runs = Path(settings.runs_root).resolve()
+    for folder in sorted(runs.iterdir()) if runs.exists() else []:
+        if not folder.is_dir() or folder.is_symlink() or folder.is_junction():
+            continue
+        old = time.time() - folder.stat().st_mtime > retention_days * 86400
+        artifacts.append(
+            {
+                "run_id": folder.name,
+                "physical_bytes": tree_bytes(folder),
+                "manual_archive_candidate": (folder / "result.json").is_file() and old,
+            }
+        )
     console.print_json(
         data={
             "execution_mode": "trusted_local",
             "retention": "keep_all",
             "total_limit_bytes": settings.workspace_total_max_bytes,
             "workspaces": entries,
+            "artifacts": artifacts,
+            "artifacts_limit_bytes": settings.run_artifacts_max_bytes,
+            "artifacts_total_limit_bytes": settings.runs_total_max_bytes,
         }
     )
 

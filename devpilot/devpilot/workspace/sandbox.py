@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from devpilot.security import linked, permitted_files, redact
-from devpilot.storage import atomic_write
+from devpilot.storage import ArtifactQuotaExceeded, atomic_write, tree_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,8 @@ class SandboxWorkspace:
         self.secrets: tuple[str, ...] = ()
         self.max_bytes = 268435456
         self.total_max_bytes = 2147483648
+        self.artifacts_max_bytes = 536870912
+        self.artifacts_total_max_bytes = 4294967296
         self.base_repo = Path(base_repo_path).resolve()
         self.workspace_root = Path(workspace_root).resolve()
         self.runs_root = Path(runs_root).resolve()
@@ -97,6 +99,12 @@ class SandboxWorkspace:
         """Return the workspace repo path for a run."""
         return str(self.workspace_root / run_id / "repo")
 
+    def check_artifacts(self, run_id: str, reserve: int = 0) -> None:
+        if tree_bytes(Path(self.get_runs_dir(run_id))) + reserve > self.artifacts_max_bytes:
+            raise ArtifactQuotaExceeded("run_artifacts_max_bytes")
+        if tree_bytes(self.runs_root) + reserve > self.artifacts_total_max_bytes:
+            raise ArtifactQuotaExceeded("runs_total_max_bytes")
+
     def get_runs_dir(self, run_id: str) -> str:
         """Return the runs directory path for a run."""
         return str(self.runs_root / run_id)
@@ -114,6 +122,16 @@ class SandboxWorkspace:
             raise PermissionError("Artifact escapes runs root")
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         safe = content if artifact_path.suffix == ".diff" else redact(content, self.secrets)
+        # Preserve small failure/checkpoint diagnostics even after admission is refused.
+        diagnostics = {
+            "state.json",
+            "checkpoint.json",
+            "result.json",
+            "llm-requests.json",
+            "eval_result.json",
+        }
+        if name not in diagnostics:
+            self.check_artifacts(run_id, len(safe.encode("utf-8")))
         atomic_write(artifact_path, safe)
         return str(artifact_path)
 

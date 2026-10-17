@@ -32,6 +32,17 @@ assert len(load_manifest()["baseline_files"]) == 44
 prepare_task(packaged_baseline(), Path.cwd() / "candidate", "DEV-007")
 result = CliRunner().invoke(app, ['eval', '--help'])
 assert result.exit_code == 0, result.output
+result = CliRunner().invoke(app, ['resume', '--help'])
+assert result.exit_code == 0, result.output
+from devpilot.processes import run_process
+from devpilot.security import process_environment
+from devpilot.storage import RunLock
+import sys
+with RunLock(Path.cwd() / 'installed-run.lock'):
+    process = run_process([sys.executable, '-c', "print('installed-process-ok')"],
+        cwd=Path.cwd(), env=process_environment(), log=Path.cwd() / 'process.log', timeout=10)
+assert process.exit_code == 0
+assert 'installed-process-ok' in (Path.cwd() / 'process.log').read_text()
 print('Installed wheel CLI and evaluation resources verified')
 """
     subprocess.run([str(python), "-I", "-c", code], cwd=root, check=True)

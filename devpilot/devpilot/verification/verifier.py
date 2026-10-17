@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 import sys
 import time
@@ -14,6 +13,7 @@ from pydantic import BaseModel
 from devpilot.domain.decision import ToolAction
 from devpilot.domain.state import DevPilotState
 from devpilot.domain.task import DevelopmentTask
+from devpilot.processes import run_cancellable
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.tools.context import ToolContext
 from devpilot.tools.registry import ToolRegistry
@@ -138,7 +138,7 @@ class TaskVerifier:
             shutil.copyfile(candidate / relative, target)
         test_tool = registry.get("test.run")
         python = getattr(test_tool, "python_executable", sys.executable)
-        visible = await asyncio.to_thread(
+        visible = await run_cancellable(
             run_independent_suite,
             candidate,
             baseline_tests,
@@ -147,6 +147,8 @@ class TaskVerifier:
             timeout=self._timeout(),
             trusted_fixtures=False,
             deadline=self.deadline,
+            output_limit=self.config.max_test_output_bytes,
+            secrets=getattr(test_tool, "secrets", ()),
         )
         checks.append(
             {
@@ -158,7 +160,7 @@ class TaskVerifier:
         )
         added = None
         if additions:
-            added = await asyncio.to_thread(
+            added = await run_cancellable(
                 run_independent_suite,
                 candidate,
                 new_tests,
@@ -167,6 +169,8 @@ class TaskVerifier:
                 timeout=self._timeout(),
                 trusted_fixtures=False,
                 deadline=self.deadline,
+                output_limit=self.config.max_test_output_bytes,
+                secrets=getattr(test_tool, "secrets", ()),
             )
             checks.append(
                 {

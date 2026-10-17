@@ -69,3 +69,23 @@ async def test_bad_issue_preserves_error_artifact(tmp_path):
     assert result.evaluation_status == "ERROR"
     assert result.task_success is None
     assert (Path(settings.runs_root) / result.run_id / "eval_result.json").is_file()
+
+
+async def test_evaluation_disk_failure_returns_redacted_fallback(tmp_path, monkeypatch):
+    from devpilot.workspace.sandbox import SandboxWorkspace
+
+    settings = Settings(
+        _env_file=None, runs_root=str(tmp_path / "runs"), api_key="synthetic-p2-secret"
+    )
+    evaluator = EvalRunner(str(tmp_path), issues_dir=str(tmp_path), settings=settings)
+
+    def unavailable(*args):
+        raise OSError("synthetic-p2-secret")
+
+    monkeypatch.setattr(SandboxWorkspace, "save_artifact", unavailable)
+    monkeypatch.setattr("devpilot.evals.runner.tempfile.gettempdir", lambda: str(tmp_path))
+    result = await evaluator.run_eval("MISSING")
+    assert result.evaluation_status == "ERROR"
+    assert result.artifact_errors == ["eval_result.json: OSError"]
+    assert Path(result.recovery_file).is_file()
+    assert settings.api_key not in Path(result.recovery_file).read_text()

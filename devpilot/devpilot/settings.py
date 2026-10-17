@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from devpilot.llm.config import LLMConfig
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
         env_prefix="DEVPILOT_",
         env_file=".env",
         extra="ignore",
+        allow_inf_nan=False,
     )
 
     model: str = "gpt-4o"
@@ -35,16 +37,24 @@ class Settings(BaseSettings):
     max_modified_files: int = Field(default=10, gt=0)
     max_patch_failures: int = Field(default=3, gt=0)
     test_timeout_seconds: int = Field(default=120, gt=0)
+    max_test_output_bytes: int = Field(default=2097152, gt=0)
     max_llm_requests: int = Field(default=90, gt=0)
     llm_timeout_seconds: float = Field(default=120, gt=0)
     max_run_seconds: float = Field(default=1800, gt=0)
     workspace_max_bytes: int = Field(default=268435456, gt=0)
     workspace_total_max_bytes: int = Field(default=2147483648, gt=0)
+    run_artifacts_max_bytes: int = Field(default=536870912, gt=0)
+    runs_total_max_bytes: int = Field(default=4294967296, gt=0)
     test_python: str = sys.executable
     network_access: bool = False
     workspace_root: str = "./workspaces"
     runs_root: str = "./runs"
     base_repo: str = "../shopflow-order-service"
+
+    @field_validator("test_python")
+    @classmethod
+    def absolute_interpreter(cls, value: str) -> str:
+        return str(Path(value).resolve()) if "/" in value or "\\" in value else value
 
     def runtime_config(self) -> RuntimeConfig:
         return RuntimeConfig(

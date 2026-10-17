@@ -13,6 +13,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from devpilot.processes import run_process
 from devpilot.security import process_environment
 from devpilot.workspace.sandbox import SandboxWorkspace, _git_init
 
@@ -214,12 +216,17 @@ def run_independent_suite(
     performance: bool = False,
     trusted_fixtures: bool = True,
     deadline: float | None = None,
+    output_limit: int = 2097152,
+    secrets: tuple[str, ...] = (),
+    cancel: threading.Event | None = None,
 ) -> SuiteResult:
     """Execute evaluator tests with explicit config outside the candidate tree.
 
     This prevents candidate pytest config/conftest from controlling collection.
     It is process hygiene for a controlled repository, not OS-level isolation.
     """
+    if cancel is not None and cancel.is_set():
+        return SuiteResult(status="ERROR", reason="Suite cancelled")
     if deadline is not None and time.monotonic() >= deadline:
         return SuiteResult(status="ERROR", reason="Run deadline exceeded")
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -274,21 +281,32 @@ def run_independent_suite(
         if timeout <= 0:
             return SuiteResult(status="ERROR", reason="Run deadline exceeded")
     try:
-        process = subprocess.run(
+        process = run_process(
             command,
             cwd=harness,
             env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            log=log,
             timeout=timeout,
+            output_limit=output_limit,
+            secrets=secrets,
+            cancel=cancel,
         )
-        log.write_text(process.stdout + process.stderr, encoding="utf-8")
-        result = parse_junit(report, process.returncode)
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        log.write_text(str(exc), encoding="utf-8")
-        result = SuiteResult(status="ERROR", reason=f"Test process error: {exc}")
+        if process.timed_out or process.output_limited or process.cancelled:
+            result = SuiteResult(
+                status="ERROR",
+                reason=(
+                    "Test process timed out"
+                    if process.timed_out
+                    else "Suite cancelled"
+                    if process.cancelled
+                    else "Test output limit exceeded"
+                ),
+            )
+        else:
+            result = parse_junit(report, process.exit_code)
+    except (OSError, RuntimeError) as exc:
+        log.write_text(type(exc).__name__, encoding="utf-8")
+        result = SuiteResult(status="ERROR", reason=f"Test process error: {type(exc).__name__}")
     result.duration_ms = int((time.monotonic() - started) * 1000)
     result.log_file = str(log)
     return result

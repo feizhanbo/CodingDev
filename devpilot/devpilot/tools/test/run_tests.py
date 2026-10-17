@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import time
 import uuid
@@ -10,7 +9,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from devpilot.security import process_environment, redact
+from devpilot.processes import run_process_async
+from devpilot.security import process_environment
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
@@ -41,7 +41,8 @@ constraints:
   - executes pytest only; no other commands
   - runs with cwd set to the workspace root
   - a timeout is enforced (default 120s, configurable)
-  - full output is saved to a log file; summary is truncated to 2000 chars
+  - output is streamed to a bounded log; exceeding its limit fails the test run
+  - summary is truncated to 2000 chars
 """
     input_model = RunTestsInput
 
@@ -53,9 +54,16 @@ constraints:
         python_executable: str | None = None,
         timeout_seconds: int = 120,
         runs_root: str = "./runs",
+        output_limit_bytes: int = 2097152,
     ) -> None:
+        self.output_limit_bytes = output_limit_bytes
         self.secrets: tuple[str, ...] = ()
-        self.python_executable = python_executable or sys.executable
+        executable = python_executable or sys.executable
+        self.python_executable = (
+            str(Path(executable).resolve())
+            if "/" in executable or "\\" in executable
+            else executable
+        )
         self.timeout_seconds = timeout_seconds
         self.runs_root = Path(runs_root).resolve()
 
@@ -85,65 +93,62 @@ constraints:
             f"--junitxml={report_path}",
         ]
 
-        start = time.monotonic()
+        timeout = ctx.test_timeout_seconds or self.timeout_seconds
+        if ctx.deadline is not None:
+            timeout = min(timeout, ctx.deadline - time.monotonic())
+        if timeout <= 0:
+            return ToolResult(success=False, error="Run deadline exceeded before pytest")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=ctx.workspace_root,
+            process = await run_process_async(
+                cmd,
+                cwd=Path(ctx.workspace_root),
                 env=process_environment(),
+                log=log_path,
+                timeout=timeout,
+                output_limit=self.output_limit_bytes,
+                secrets=self.secrets,
             )
-        except (FileNotFoundError, OSError) as exc:
+        except (OSError, RuntimeError) as exc:
             return ToolResult(
                 success=False,
-                error=f"Failed to start pytest: {exc}",
+                error=(
+                    f"Failed to start pytest: {type(exc).__name__}"
+                    if isinstance(exc, FileNotFoundError)
+                    else f"Pytest process error: {type(exc).__name__}"
+                ),
                 data={
                     "exit_code": -1,
+                    "passed": None,
+                    "failed": None,
+                    "log_file": str(log_path),
                     "duration_ms": 0,
                     "summary": str(exc),
-                    "log_file": "",
-                    "passed": None,
-                    "failed": None,
                 },
             )
-
-        try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=ctx.test_timeout_seconds or self.timeout_seconds
+        output = log_path.read_text(encoding="utf-8")
+        if process.timed_out or process.output_limited:
+            reason = (
+                f"Test timed out after {timeout}s"
+                if process.timed_out
+                else "Test output limit exceeded"
             )
-        except (TimeoutError, asyncio.CancelledError) as exc:
-            await _kill_and_wait(proc)
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            output = "Test timed out; no output captured."
-            _write_log(log_path, output)
-            elapsed = int((time.monotonic() - start) * 1000)
             return ToolResult(
                 success=False,
                 data={
                     "exit_code": -1,
                     "passed": None,
                     "failed": None,
-                    "duration_ms": elapsed,
-                    "summary": (
-                        f"Test timed out after {ctx.test_timeout_seconds or self.timeout_seconds}s"
-                    ),
+                    "duration_ms": process.duration_ms,
+                    "summary": reason,
                     "log_file": str(log_path),
+                    "status": "ERROR",
                 },
             )
-
-        elapsed = int((time.monotonic() - start) * 1000)
-        output = redact(stdout.decode(errors="replace"), self.secrets)
-        _write_log(log_path, output)
-
-        evidence = parse_junit(report_path, proc.returncode)
-        summary = output[-SUMMARY_LIMIT:]
-
+        evidence = parse_junit(report_path, process.exit_code)
         return ToolResult(
             success=evidence.status == "PASS",
             data={
-                "exit_code": proc.returncode,
+                "exit_code": process.exit_code,
                 "passed": evidence.passed,
                 "failed": evidence.failed,
                 "collected": evidence.collected,
@@ -151,8 +156,8 @@ constraints:
                 "skipped": evidence.skipped,
                 "status": evidence.status,
                 "report_file": str(report_path),
-                "duration_ms": elapsed,
-                "summary": summary,
+                "duration_ms": process.duration_ms,
+                "summary": output[-SUMMARY_LIMIT:],
                 "log_file": str(log_path),
             },
         )
@@ -166,10 +171,6 @@ def _log_path(ctx: ToolContext, runs_root: Path | None = None) -> Path:
         else ((runs_root or Path("./runs").resolve()) / ctx.run_id)
     )
     return root / "tests" / f"{uuid.uuid4().hex}.log"
-
-
-def _write_log(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
 
 
 def _validate_extra_args(arguments: list[str]) -> None:
@@ -186,12 +187,3 @@ def _validate_extra_args(arguments: list[str]) -> None:
             index += 1
         else:
             raise PermissionError(f"Unsupported pytest argument: {arg}")
-
-
-async def _kill_and_wait(proc: asyncio.subprocess.Process) -> None:
-    """Terminate a subprocess and reap it (safe inside a running loop)."""
-    try:
-        proc.kill()
-    except ProcessLookupError:
-        return
-    await proc.wait()

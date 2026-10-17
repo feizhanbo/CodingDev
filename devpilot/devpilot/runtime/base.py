@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -31,6 +32,7 @@ class RuntimeConfig:
     max_modified_files: int = 10
     max_patch_failures: int = 3
     test_timeout_seconds: int = 120
+    max_test_output_bytes: int = 2097152
     max_llm_requests: int = 90
     llm_timeout_seconds: float = 120
     max_run_seconds: float = 1800
@@ -41,11 +43,12 @@ class RuntimeConfig:
             "max_modified_files",
             "max_patch_failures",
             "test_timeout_seconds",
+            "max_test_output_bytes",
             "max_llm_requests",
             "llm_timeout_seconds",
             "max_run_seconds",
         ):
-            if getattr(self, name) <= 0:
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.max_test_retries < 0:
             raise ValueError("max_test_retries must be non-negative")

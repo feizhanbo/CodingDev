@@ -229,13 +229,40 @@ Workspaces exclude forbidden credential paths and reject links. Search uses lite
 rg and Python implementations. This does not detect all unknown secrets. Tests inherit only a small
 environment allowlist. Frozen evidence and exported diffs retain their actual code contents.
 
-State is checkpointed between decisions and single JSON files use atomic replacement. Failed artifact
-writes are reported in `artifact_errors`; when possible, a redacted recovery record is saved under the
-system temporary directory (`recovery_file`). This is diagnostic recovery, not automatic task resume.
+`checkpoint.json` atomically preserves ordinary-run state, request/retry accounting, guard history,
+metrics, the original deadline, and workspace/evidence hashes. `devpilot resume RUN_ID --env-file PATH`
+continues a compatible interrupted run at a ready/model boundary. Use the same configuration,
+provider/model, target interpreter and DevPilot code. Downtime consumes the original time budget;
+interrupted requests retain unknown token usage. A kernel file lock rejects simultaneous execution.
+Terminal runs, evaluations, changed files/evidence, and tools/verifiers interrupted during execution
+are refused. Inspect these manually and start a fresh run; resume never replays uncertain side effects.
+Older artifacts without this checkpoint remain inspectable but cannot be resumed.
+
+Failed artifact writes are reported in `artifact_errors`; when possible, a redacted diagnostic record
+is saved under the system temporary directory (`recovery_file`). A diagnostic fallback is not a
+resumable checkpoint. Progress display failures do not discard terminal results.
 
 Logical workspace limits default to 256 MiB per run and 2 GiB in total, configurable through
 `DEVPILOT_WORKSPACE_MAX_BYTES` and `DEVPILOT_WORKSPACE_TOTAL_MAX_BYTES`. Git objects and run artifacts
 are outside these logical byte totals. `devpilot workspace-report --retention-days 7` is read-only and
 lists older completed runs for manual archiving. Existing workspaces and evidence are never
-automatically deleted. Disk usage of logs, snapshots and verification copies still requires monitoring.
+automatically deleted.
+
+Artifact admission limits default to 512 MiB per agent run (`DEVPILOT_RUN_ARTIFACTS_MAX_BYTES`) and
+4 GiB across the configured runs root (`DEVPILOT_RUNS_TOTAL_MAX_BYTES`). Physical file counts include
+Git objects, logs and copied verification trees. Preparation, loop steps, test dispatch and final
+verification check available capacity, with conservative reservations for copies/output. Capacity
+refusal sets `termination_reason=artifact_quota`; diagnostic JSON files remain writable so the failure
+can be explained. The read-only report now lists both workspace and artifact bytes. These are
+admission checks, not atomic reservations or a filesystem quota: concurrent different runs, report
+XML, arbitrary candidate writes and synchronous preparation can still exceed estimates. Monitor disk
+space and archive manually; standalone benchmark-check output also requires monitoring.
+
+Tests stream stdout/stderr with a 2 MiB default cap (`DEVPILOT_MAX_TEST_OUTPUT_BYTES`). Output overflow
+is ERROR with a partial log, never a passing test. Timeout/cancellation waits for owned process-tree
+cleanup (POSIX process group; Windows Job Object with a trusted startup gate). Visible, added and
+hidden suites share this implementation. Cleanup has bounded additional wait time, while synchronous
+host file operations cannot be forcibly interrupted. Process lifetime management does not restrict
+filesystem/network access or provide a sandbox. See
+[the P2 follow-up record](../docs/P2异常恢复与运行稳定性整改记录.md) for validation and remaining limits.
 

@@ -21,52 +21,42 @@ class OrderService:
         calculates total, applies coupon if provided, creates order with items,
         and updates product stock.
         """
-        customer_repo = CustomerRepository(db)
-        customer = customer_repo.get_by_id(order_data.customer_id)
-        if not customer:
-            raise ValueError(f"Customer {order_data.customer_id} not found")
-
-        product_repo = ProductRepository(db)
-        order_items = []
-        total_amount = 0.0
-
-        for item in order_data.items:
-            product = product_repo.get_by_id(item.product_id)
-            if not product:
-                raise ValueError(f"Product {item.product_id} not found")
-            if product.stock < item.quantity:
-                raise ValueError(f"Insufficient stock for product {item.product_id}")
-
-            unit_price = product.price
-            total_amount += unit_price * item.quantity
-            order_items.append(
-                {
-                    "product_id": item.product_id,
-                    "quantity": item.quantity,
-                    "unit_price": unit_price,
-                }
-            )
-
-        if order_data.coupon_code:
-            coupon = db.query(Coupon).filter(Coupon.code == order_data.coupon_code).first()
-            if not coupon:
-                raise ValueError(f"Coupon {order_data.coupon_code} not found")
-            _discount, total_amount = apply_coupon(total_amount, coupon)
-
-        order_repo = OrderRepository(db)
-        order = order_repo.create(
-            {
-                "customer_id": order_data.customer_id,
-                "status": "pending",
-                "total_amount": total_amount,
-                "items": order_items,
-            }
-        )
-
-        for item in order_data.items:
-            product_repo.update_stock(item.product_id, -item.quantity)
-
-        return order
+        try:
+            if not order_data.items:
+                raise ValueError("Order must contain items")
+            quantities: dict[int, int] = {}
+            for item in order_data.items:
+                if type(item.quantity) is not int or item.quantity <= 0:
+                    raise ValueError("Quantity must be a positive integer")
+                quantities[item.product_id] = quantities.get(item.product_id, 0) + item.quantity
+            if not CustomerRepository(db).get_by_id(order_data.customer_id):
+                raise ValueError(f"Customer {order_data.customer_id} not found")
+            product_repo = ProductRepository(db)
+            items = []
+            total = 0.0
+            for product_id, quantity in sorted(quantities.items()):
+                product = product_repo.get_by_id(product_id)
+                if not product:
+                    raise ValueError(f"Product {product_id} not found")
+                total += product.price * quantity
+                items.append({"product_id": product_id, "quantity": quantity,
+                              "unit_price": product.price})
+                if product_repo.update_stock(product_id, -quantity) is None:
+                    raise ValueError(f"Insufficient stock for product {product_id}")
+            if order_data.coupon_code:
+                coupon = db.query(Coupon).filter(Coupon.code == order_data.coupon_code).first()
+                if not coupon:
+                    raise ValueError(f"Coupon {order_data.coupon_code} not found")
+                _, total = apply_coupon(total, coupon)
+            order = OrderRepository(db).create({"customer_id": order_data.customer_id,
+                                               "status": "pending", "total_amount": total,
+                                               "items": items})
+            db.commit()
+            db.refresh(order)
+            return order
+        except Exception:
+            db.rollback()
+            raise
 
     @staticmethod
     def get_order(db: Session, order_id: int) -> OrderDetailResponse:
@@ -82,6 +72,8 @@ class OrderService:
         db: Session, skip: int = 0, limit: int = 20
     ) -> list[OrderResponse]:
         """Get all orders with pagination."""
+        if skip < 0 or not 1 <= limit <= 100:
+            raise ValueError("Invalid pagination")
         order_repo = OrderRepository(db)
         orders = order_repo.get_all(skip=skip, limit=limit)
         return [OrderResponse.model_validate(order) for order in orders]
@@ -89,25 +81,37 @@ class OrderService:
     @staticmethod
     def pay_order(db: Session, order_id: int) -> object:
         """Transition an order from pending to paid."""
-        order_repo = OrderRepository(db)
-        order = order_repo.get_by_id(order_id)
-        if not order:
-            raise ValueError(f"Order {order_id} not found")
-        if order.status != "pending":
-            raise ValueError(f"Cannot pay order with status {order.status}")
-        return order_repo.update_status(order_id, "paid")
+        try:
+            repo = OrderRepository(db)
+            if not repo.transition_status(order_id, ("pending",), "paid"):
+                order = repo.get_by_id(order_id)
+                if order is None:
+                    raise ValueError(f"Order {order_id} not found")
+                raise ValueError(f"Cannot pay order with status {order.status}")
+            db.commit()
+            return repo.get_by_id(order_id)
+        except Exception:
+            db.rollback()
+            raise
 
     @staticmethod
     def cancel_order(db: Session, order_id: int) -> object:
-        """Cancel an order.
-
-        Allowed transitions: pending -> cancelled, paid -> cancelled.
-        Rejected for shipped or completed orders.
-        """
-        order_repo = OrderRepository(db)
-        order = order_repo.get_by_id(order_id)
-        if not order:
-            raise ValueError(f"Order {order_id} not found")
-        if order.status in ("shipped", "completed"):
-            raise ValueError(f"Cannot cancel order with status {order.status}")
-        return order_repo.update_status(order_id, "cancelled")
+        """Cancel once, restoring stock in the same transaction; payment is simulated."""
+        try:
+            repo = OrderRepository(db)
+            changed = repo.transition_status(order_id, ("pending", "paid"), "cancelled")
+            order = repo.get_by_id(order_id)
+            if order is None:
+                raise ValueError(f"Order {order_id} not found")
+            if not changed:
+                if order.status != "cancelled":
+                    raise ValueError(f"Cannot cancel order with status {order.status}")
+            else:
+                for item in sorted(order.items, key=lambda x: x.product_id):
+                    if ProductRepository(db).update_stock(item.product_id, item.quantity) is None:
+                        raise ValueError(f"Product {item.product_id} not found")
+            db.commit()
+            return repo.get_by_id(order_id)
+        except Exception:
+            db.rollback()
+            raise

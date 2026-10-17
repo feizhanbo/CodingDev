@@ -1,5 +1,6 @@
 """ShopFlow Order Service - order repository."""
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.order import Order
@@ -19,8 +20,8 @@ class OrderRepository:
             order_data: dict with keys customer_id, status, total_amount,
                         and items (list of dicts with product_id, quantity, unit_price).
         """
-        items_data = order_data.pop("items", [])
-        order = Order(**order_data)
+        items_data = order_data.get("items", [])
+        order = Order(**{k: v for k, v in order_data.items() if k != "items"})
         self.db.add(order)
         self.db.flush()
 
@@ -28,7 +29,7 @@ class OrderRepository:
             item = OrderItem(order_id=order.id, **item_data)
             self.db.add(item)
 
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(order)
         return order
 
@@ -43,13 +44,22 @@ class OrderRepository:
 
     def get_all(self, skip: int = 0, limit: int = 20) -> list[Order]:
         """Get all orders with pagination."""
-        return self.db.query(Order).offset(skip).limit(limit).all()
+        return self.db.query(Order).order_by(Order.id).offset(skip).limit(limit).all()
 
     def update_status(self, order_id: int, new_status: str) -> Order | None:
         """Update the status of an order."""
         order = self.db.query(Order).filter(Order.id == order_id).first()
         if order:
             order.status = new_status
-            self.db.commit()
+            self.db.flush()
             self.db.refresh(order)
         return order
+
+    def transition_status(self, order_id: int, expected: tuple[str, ...], new: str) -> bool:
+        """Compare-and-set; the service owns commit/rollback."""
+        result = self.db.execute(
+            update(Order).where(Order.id == order_id, Order.status.in_(expected))
+            .values(status=new)
+        )
+        self.db.flush()
+        return result.rowcount == 1

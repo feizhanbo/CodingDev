@@ -37,7 +37,9 @@ def test_update_stock(seeded_session):
     assert original.stock == 100
 
     updated = repo.update_stock(ids["products"]["mouse"], -5)
+    session.commit()
     assert updated.stock == 95
 
     updated = repo.update_stock(ids["products"]["mouse"], 10)
+    session.commit()
     assert updated.stock == 105

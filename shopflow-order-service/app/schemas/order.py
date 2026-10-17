@@ -2,21 +2,21 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 
 class OrderItemCreate(BaseModel):
     """Schema for creating an order item."""
 
     product_id: int
-    quantity: int
+    quantity: StrictInt = Field(gt=0)
 
 
 class OrderCreate(BaseModel):
     """Schema for creating an order."""
 
     customer_id: int
-    items: list[OrderItemCreate]
+    items: list[OrderItemCreate] = Field(min_length=1)
     coupon_code: str | None = None
 
 

@@ -21,6 +21,7 @@ def test_create(seeded_session):
             ],
         }
     )
+    session.commit()
     assert order.id is not None
     assert order.status == "pending"
     assert order.total_amount == 999.0
@@ -45,6 +46,7 @@ def test_get_by_id(seeded_session):
             ],
         }
     )
+    session.commit()
     order = repo.get_by_id(created.id)
     assert order is not None
     assert order.id == created.id
@@ -72,6 +74,7 @@ def test_get_all(seeded_session):
             "items": [],
         }
     )
+    session.commit()
     repo.create(
         {
             "customer_id": ids["customers"]["bob"],
@@ -80,6 +83,7 @@ def test_get_all(seeded_session):
             "items": [],
         }
     )
+    session.commit()
     orders = repo.get_all()
     assert len(orders) == 2
 
@@ -97,6 +101,7 @@ def test_get_all_pagination(seeded_session):
                 "items": [],
             }
         )
+        session.commit()
     orders = repo.get_all(skip=2, limit=2)
     assert len(orders) == 2
 
@@ -113,6 +118,8 @@ def test_update_status(seeded_session):
             "items": [],
         }
     )
+    session.commit()
     updated = repo.update_status(order.id, "paid")
+    session.commit()
     assert updated is not None
     assert updated.status == "paid"

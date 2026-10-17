@@ -204,6 +204,7 @@ def test_cancel_order_shipped(seeded_session):
     )
     repo = OrderRepository(session)
     repo.update_status(order.id, "shipped")
+    session.commit()
     with pytest.raises(ValueError, match="Cannot cancel"):
         OrderService.cancel_order(session, order.id)
 
@@ -220,5 +221,6 @@ def test_cancel_order_completed(seeded_session):
     )
     repo = OrderRepository(session)
     repo.update_status(order.id, "completed")
+    session.commit()
     with pytest.raises(ValueError, match="Cannot cancel"):
         OrderService.cancel_order(session, order.id)

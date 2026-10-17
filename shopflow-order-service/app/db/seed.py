@@ -4,6 +4,8 @@ import app.models  # noqa: F401 - register all models
 from app.db.database import Base, SessionLocal, engine
 from app.models.coupon import Coupon
 from app.models.customer import Customer
+from app.models.order import Order
+from app.models.order_item import OrderItem
 from app.models.product import Product
 from app.schemas.order import OrderCreate, OrderItemCreate
 from app.services.order_service import OrderService
@@ -15,6 +17,8 @@ def seed():
     db = SessionLocal()
 
     # Clear existing data
+    db.query(OrderItem).delete()
+    db.query(Order).delete()
     db.query(Coupon).delete()
     db.query(Product).delete()
     db.query(Customer).delete()

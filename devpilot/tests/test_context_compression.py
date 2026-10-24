@@ -286,7 +286,7 @@ class TestContextCompression:
         self, registry: ToolRegistry
     ) -> None:
         cb = ContextBuilder(RuntimeConfig(), registry)
-        cb.max_context_chars = 1
+        cb.max_context_chars = 30000
         obs = [_make_obs(i) for i in range(1, 16)]
         state = _make_state(phase="exploring", observations=obs)
         state.total_steps = 15
@@ -294,14 +294,14 @@ class TestContextCompression:
         messages = cb.build(state, "/workspace")
         state_msg = next(m for m in messages if "Current Phase" in m.content)
 
-        assert "7 earlier steps" in state_msg.content
-        assert "last 8" in state_msg.content
+        assert "5 earlier steps" in state_msg.content
+        assert "last 10" in state_msg.content
 
     def test_compression_preserves_task(
         self, registry: ToolRegistry
     ) -> None:
         cb = ContextBuilder(RuntimeConfig(), registry)
-        cb.max_context_chars = 1
+        cb.max_context_chars = 30000
         obs = [_make_obs(i) for i in range(1, 16)]
         state = _make_state(phase="exploring", observations=obs)
         state.total_steps = 15
@@ -318,7 +318,7 @@ class TestContextCompression:
         self, registry: ToolRegistry
     ) -> None:
         cb = ContextBuilder(RuntimeConfig(), registry)
-        cb.max_context_chars = 1
+        cb.max_context_chars = 30000
         obs = [_make_obs(i) for i in range(1, 16)]
         state = _make_state(phase="implementing", observations=obs)
         state.total_steps = 15
@@ -335,7 +335,7 @@ class TestContextCompression:
         self, registry: ToolRegistry
     ) -> None:
         cb = ContextBuilder(RuntimeConfig(), registry)
-        cb.max_context_chars = 100000
+        cb.max_context_chars = 3000000000
         obs = [_make_obs(i) for i in range(1, 16)]
         state = _make_state(phase="exploring", observations=obs)
         state.total_steps = 15

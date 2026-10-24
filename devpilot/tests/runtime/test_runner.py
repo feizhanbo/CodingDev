@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tests.verifier_stub import PassingVerifier
 
 from devpilot.agents.developer import DeveloperAgent
 from devpilot.domain.decision import AgentDecision, FinishIntent, ToolAction
@@ -85,6 +86,7 @@ def _make_runner(
         context_builder=context_builder,
         loop_guard=loop_guard,
         config=config,
+        verifier=PassingVerifier(),
     )
 
 

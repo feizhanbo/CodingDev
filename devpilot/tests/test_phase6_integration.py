@@ -358,33 +358,11 @@ class TestPhase6FullIntegration:
         loop_guard = LoopGuard(config)
         trace_writer = TraceWriter(str(tmp_path / "runs"))
         metrics = MetricsCollector()
-        runner = CustomAgentRunner(
-            agent=agent,
-            registry=registry,
-            sandbox=sandbox,
-            state_manager=state_manager,
-            context_builder=context_builder,
-            loop_guard=loop_guard,
-            config=config,
-            verifier=None,
-            trace_writer=trace_writer,
-            metrics=metrics,
-        )
-
-        result = await runner.run(_make_task())
-
-        assert result.status == "completed"
-        assert result.total_steps == 1
-
-        runs_dir = Path(runner.sandbox.runs_root) / result.run_id
-        trace_path = runs_dir / "trace.jsonl"
-        trace_events = [
-            json.loads(line)
-            for line in trace_path.read_text(encoding="utf-8").strip().split("\n")
-        ]
-        event_types = [e["event"] for e in trace_events]
-
-        assert "run_started" in event_types
-        assert "run_completed" in event_types
-        # No verifier events without verifier
-        assert "verifier_started" not in event_types
+        import pytest
+        with pytest.raises(ValueError, match="verifier is required"):
+            CustomAgentRunner(
+                agent=agent, registry=registry, sandbox=sandbox,
+                state_manager=state_manager, context_builder=context_builder,
+                loop_guard=loop_guard, config=config, verifier=None,
+                trace_writer=trace_writer, metrics=metrics,
+            )

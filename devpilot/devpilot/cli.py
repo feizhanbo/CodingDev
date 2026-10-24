@@ -288,6 +288,11 @@ def _display_summary(result: AgentRunResult, task: DevelopmentTask) -> None:
     status_style = "green" if result.status == "completed" else "red"
     table.add_row("Status", f"[{status_style}]{result.status}[/]")
     table.add_row("Total Steps", str(result.total_steps))
+    coverage = result.acceptance_coverage
+    if coverage:
+        verified = sum(c["status"] == "verified" for c in coverage)
+        uncovered = sum(c["status"] == "uncovered" for c in coverage)
+        table.add_row("Acceptance coverage", f"{verified}/{len(coverage)} verified; {uncovered} uncovered")
     table.add_row(
         "Modified Files",
         ", ".join(result.modified_files) if result.modified_files else "(none)",

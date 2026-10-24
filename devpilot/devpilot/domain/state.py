@@ -52,3 +52,5 @@ class DevPilotState(BaseModel):
     retry_count: int = 0
     completion_requested: bool = False
     repair_required: bool = False
+    repair_sources: list[str] = []
+    verification_report: dict[str, Any] | None = None

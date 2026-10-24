@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     run_artifacts_max_bytes: int = Field(default=536870912, gt=0)
     runs_total_max_bytes: int = Field(default=4294967296, gt=0)
     test_python: str = sys.executable
+    max_context_chars: int = Field(default=30000, gt=0)
+    tool_timeout_seconds: int = Field(default=120, gt=0)
+    max_tool_output_bytes: int = Field(default=2097152, gt=0)
+    preparation_timeout_seconds: int = Field(default=120, gt=0)
+    evaluation_timeout_seconds: int = Field(default=120, gt=0)
+    diagnostic_reserve_bytes: int = Field(default=8388608, gt=0)
     network_access: bool = False
     workspace_root: str = "./workspaces"
     runs_root: str = "./runs"

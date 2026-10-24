@@ -89,6 +89,29 @@ class StateManager:
         """Mark that agent requested finish."""
         state.completion_requested = True
 
+    def reject_verification(self, state: DevPilotState, report: dict) -> None:
+        state.retry_count += 1
+        state.completion_requested = False
+        self.set_repair(state, "verification", True)
+        state.verification_report = report
+        self.add_observation(state, Observation(
+            step_id=state.total_steps + 1, source="verifier",
+            name="verification_failed", success=False,
+            summary=report.get("failure_reason") or "Verification failed", data=report,
+        ))
+        if state.phase in {"completed", "failed"}:
+            raise ValueError("Cannot repair a terminal run")
+        state.phase = "implementing"
+
+    def set_repair(self, state: DevPilotState, source: str, required: bool) -> None:
+        sources = set(state.repair_sources)
+        if required:
+            sources.add(source)
+        else:
+            sources.discard(source)
+        state.repair_sources = sorted(sources)
+        state.repair_required = bool(sources)
+
     def increment_retry(self, state: DevPilotState) -> None:
         """Increment retry count."""
         state.retry_count += 1

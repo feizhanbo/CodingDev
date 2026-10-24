@@ -10,6 +10,10 @@ from pydantic import BaseModel
 from devpilot.domain.decision import AgentDecision
 
 
+class ContextBudgetExceeded(ValueError):
+    """Required context cannot fit; never send a model request."""
+
+
 class LLMMessage(BaseModel):
     """A single message in an LLM conversation."""
 

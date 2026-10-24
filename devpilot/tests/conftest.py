@@ -95,3 +95,18 @@ def registry() -> ToolRegistry:
     ):
         reg.register(tool)
     return reg
+
+
+@pytest.fixture(autouse=True)
+def forbid_paid_model_requests(monkeypatch):
+    """Fail before transport if a test accidentally uses a real model."""
+    from openai.resources.chat.completions import AsyncCompletions, Completions
+
+    async def blocked_async(*args, **kwargs):
+        raise AssertionError("Real model requests are forbidden in tests")
+
+    def blocked(*args, **kwargs):
+        raise AssertionError("Real model requests are forbidden in tests")
+
+    monkeypatch.setattr(AsyncCompletions, "create", blocked_async)
+    monkeypatch.setattr(Completions, "create", blocked)

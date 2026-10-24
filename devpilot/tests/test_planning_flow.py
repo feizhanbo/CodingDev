@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from tests.verifier_stub import PassingVerifier
 
 from devpilot.agents.developer import DeveloperAgent
 from devpilot.domain.decision import AgentDecision, FinishIntent, ToolAction
@@ -98,7 +99,7 @@ def _make_runner(
     state_manager = StateManager(config)
     context_builder = ContextBuilder(config, registry)
     loop_guard = LoopGuard(config)
-    verifier = TaskVerifier(config) if with_verifier else None
+    verifier = TaskVerifier(config) if with_verifier else PassingVerifier()
     trace_writer = TraceWriter(str(tmp_path / "runs"))
     metrics = MetricsCollector()
     return CustomAgentRunner(

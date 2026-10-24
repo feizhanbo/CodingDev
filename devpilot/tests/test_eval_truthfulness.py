@@ -88,4 +88,4 @@ async def test_evaluation_disk_failure_returns_redacted_fallback(tmp_path, monke
     assert result.evaluation_status == "ERROR"
     assert result.artifact_errors == ["eval_result.json: OSError"]
     assert Path(result.recovery_file).is_file()
-    assert settings.api_key not in Path(result.recovery_file).read_text()
+    assert settings.api_key not in Path(result.recovery_file).read_text(encoding="utf-8")

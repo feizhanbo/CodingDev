@@ -9,7 +9,6 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,7 @@ from devpilot.domain.decision import AgentDecision, FinishIntent
 from devpilot.domain.result import AgentRunResult
 from devpilot.domain.state import DevPilotState, Observation
 from devpilot.domain.task import DevelopmentTask
+from devpilot.llm.base import ContextBudgetExceeded
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.runtime.custom.context import ContextBuilder
 from devpilot.runtime.custom.loop_guard import (
@@ -68,11 +68,14 @@ class CustomAgentRunner:
         metrics: MetricsCollector | None = None,
         file_cache: ReadFileCache | None = None,
     ) -> None:
+        if verifier is None:
+            raise ValueError("A verifier is required for every run")
         self.agent = agent
         self.registry = registry
         self.sandbox = sandbox
         self.state_manager = state_manager
         self.context_builder = context_builder
+        self.context_builder.reserved_chars = len(getattr(agent.llm_client, "_SCHEMA_HINT", ""))
         self.loop_guard = loop_guard
         self.config = config
         self.on_event = on_event
@@ -292,7 +295,7 @@ class CustomAgentRunner:
                                 decision.action.tool
                             )
                         break
-                    except BudgetExceeded:
+                    except (BudgetExceeded, ContextBudgetExceeded):
                         raise
                     except Exception as exc:
                         if _attempt == 2:
@@ -398,7 +401,10 @@ class CustomAgentRunner:
                             data=verification.model_dump(),
                         )
 
+                        state.verification_report = verification.model_dump()
                         if verification.success:
+                            self.state_manager.set_repair(state, "verification", False)
+                            self.state_manager.set_repair(state, "test", False)
                             # COMPLETED - verifier passed
                             old_phase = state.phase
                             self.state_manager.transition_phase(state, "completed")
@@ -432,7 +438,7 @@ class CustomAgentRunner:
                         else:
                             # VERIFIER REJECTED - feed failure back to agent
                             self.metrics.record_finish_rejected()
-                            self.state_manager.increment_retry(state)
+                            self.state_manager.reject_verification(state, verification.model_dump())
 
                             # Check max retries on verifier rejection
                             if state.retry_count >= self.config.max_test_retries:
@@ -460,20 +466,6 @@ class CustomAgentRunner:
                                 )
                                 return result
 
-                            failure_obs = Observation(
-                                step_id=state.total_steps,
-                                source="verifier",
-                                name="verification_failed",
-                                success=False,
-                                summary=(verification.failure_reason or "Verification failed"),
-                                data=verification.model_dump(),
-                            )
-                            self.state_manager.add_observation(state, failure_obs)
-
-                            # Transition back to implementing for repair
-                            if state.phase != "implementing":
-                                with suppress(ValueError):
-                                    self.state_manager.transition_phase(state, "implementing")
                             self._trace(
                                 run_id,
                                 state.total_steps,
@@ -486,38 +478,6 @@ class CustomAgentRunner:
                             )
                             self.attempts_in_turn = 0
                             continue
-                    else:
-                        # No verifier - just complete (backward compat)
-                        old_phase = state.phase
-                        self.state_manager.transition_phase(state, "completed")
-                        self._emit(
-                            "phase_changed",
-                            {
-                                "task_id": task.id,
-                                "from": old_phase,
-                                "to": "completed",
-                            },
-                        )
-                        result = self._build_result(state, start_time, decision.finish)
-                        self._save_artifacts(run_id, state, result)
-                        self._emit(
-                            "run_completed",
-                            {
-                                "task_id": task.id,
-                                "run_id": run_id,
-                                "status": result.status,
-                                "summary": result.summary,
-                                "total_steps": result.total_steps,
-                            },
-                        )
-                        self._trace(
-                            run_id,
-                            state.total_steps,
-                            "completed",
-                            "run_completed",
-                        )
-                        return result
-
                 # EXECUTE TOOL
                 if decision.action:
                     self._emit(
@@ -551,10 +511,7 @@ class CustomAgentRunner:
 
                     # Check read_file cache before executing the tool
                     tool_name = decision.action.tool
-                    is_read_file = tool_name in (
-                        "repo.read_file",
-                        "repo_read_file",
-                    )
+                    is_read_file = tool_name == "repo.read_file"
                     cached_result = None
                     if is_read_file:
                         rel_path = decision.action.arguments.get("path", "")
@@ -593,9 +550,7 @@ class CustomAgentRunner:
                         and tool_name
                         in (
                             "code.apply_patch",
-                            "code_apply_patch",
                             "code.create_file",
-                            "code_create_file",
                         )
                     ):
                         for f in tool_result.data.get("modified_files", []):
@@ -646,7 +601,7 @@ class CustomAgentRunner:
                     if decision.action.tool == "test.run" and not tool_result.success:
                         self.metrics.record_test_retry()
                         self.state_manager.increment_retry(state)
-                        state.repair_required = True
+                        self.state_manager.set_repair(state, "test", True)
                         try:
                             self.loop_guard.check_test_retries(state)
                         except MaxRetriesExceeded:
@@ -671,7 +626,7 @@ class CustomAgentRunner:
                             )
                             return result
                     elif decision.action.tool == "test.run" and tool_result.success:
-                        state.repair_required = False
+                        self.state_manager.set_repair(state, "test", False)
                         self.loop_guard.reset_repair_state()
 
                 # Handle plan update
@@ -778,7 +733,9 @@ class CustomAgentRunner:
             result = self._build_result(state, start_time, None)
             result.error = f"Unexpected error: {e}"
             result.termination_reason = (
-                "artifact_quota"
+                "context_budget_exceeded"
+                if isinstance(e, ContextBudgetExceeded)
+                else "artifact_quota"
                 if isinstance(e, ArtifactQuotaExceeded)
                 else "run_timeout"
                 if isinstance(e, TimeoutError)
@@ -814,7 +771,7 @@ class CustomAgentRunner:
         new_phase: str | None = None
 
         if state.phase == "understanding" and decision.action:
-            if decision.action.tool.startswith("repo.") or decision.action.tool.startswith("repo_"):
+            if decision.action.tool.startswith("repo."):
                 new_phase = "exploring"
 
         elif state.phase == "exploring":
@@ -823,7 +780,7 @@ class CustomAgentRunner:
                 new_phase = "planning"
             # If agent starts using code tools, skip to implementing
             elif decision.action and (
-                decision.action.tool.startswith("code.") or decision.action.tool.startswith("code_")
+                decision.action.tool.startswith("code.")
             ):
                 new_phase = "implementing"
 
@@ -832,7 +789,6 @@ class CustomAgentRunner:
                 decision.action
                 and (
                     decision.action.tool.startswith("code.")
-                    or decision.action.tool.startswith("code_")
                 )
             ) or state.total_steps >= 15:
                 new_phase = "implementing"
@@ -840,7 +796,7 @@ class CustomAgentRunner:
         elif (
             state.phase == "implementing"
             and decision.action
-            and (decision.action.tool == "test.run" or decision.action.tool == "test_run")
+            and decision.action.tool == "test.run"
         ):
             new_phase = "verifying"
 
@@ -875,6 +831,8 @@ class CustomAgentRunner:
             risk=finish_intent.risk if finish_intent else None,
             duration_ms=duration_ms,
             error=None if state.phase == "completed" else state.phase,
+            acceptance_coverage=(state.verification_report or {}).get("coverage", []),
+            verification=state.verification_report,
             budget={
                 "llm_requests": self.request_count,
                 "max_llm_requests": self.config.max_llm_requests,

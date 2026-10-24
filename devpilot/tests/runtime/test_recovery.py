@@ -50,7 +50,7 @@ async def interrupted_run(tmp_path, config=None, task=None):
 
 async def test_resume_preserves_workspace_steps_budget_guard_and_unknown_usage(tmp_path):
     base, config, run_id, checkpoint = await interrupted_run(tmp_path)
-    before = json.loads(checkpoint.read_text())
+    before = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert before["stage"] == "llm_inflight"
     runner = _make_runner([_resp_finish()], config, base, tmp_path)
     result = await runner.resume(run_id)
@@ -58,12 +58,12 @@ async def test_resume_preserves_workspace_steps_budget_guard_and_unknown_usage(t
     assert result.run_id == run_id
     assert result.total_steps == 1
     assert result.budget["llm_requests"] == 3
-    assert Path(runner.sandbox.get_repo_path(run_id), "new.py").read_text() == "answer = 42\n"
+    assert Path(runner.sandbox.get_repo_path(run_id), "new.py").read_text(encoding="utf-8") == "answer = 42\n"
     assert runner.metrics.tool_calls == 1
     assert runner.metrics.to_dict()["tokens"] is None
     assert len(runner.metrics.llm_requests) == 3
     assert runner.loop_guard._recent_tool_calls == before["guard"]["_recent_tool_calls"]
-    assert json.loads(checkpoint.read_text())["stage"] == "terminal"
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))["stage"] == "terminal"
     with pytest.raises(ValueError, match="terminal"):
         await runner.resume(run_id)
 
@@ -79,7 +79,7 @@ async def test_resume_request_limit_is_not_reset(tmp_path):
 
 async def test_downtime_consumes_original_deadline(tmp_path):
     base, config, run_id, checkpoint = await interrupted_run(tmp_path)
-    data = json.loads(checkpoint.read_text())
+    data = json.loads(checkpoint.read_text(encoding="utf-8"))
     data["deadline_at"] = time.time() - 1
     checkpoint.write_text(json.dumps(data))
     runner = _make_runner([_resp_finish()], config, base, tmp_path)
@@ -98,7 +98,7 @@ async def test_resume_refuses_drift_or_evaluation(tmp_path, changed):
     elif changed == "config":
         config.max_steps += 1
     else:
-        data = json.loads(checkpoint.read_text())
+        data = json.loads(checkpoint.read_text(encoding="utf-8"))
         data["purpose"] = "evaluation"
         checkpoint.write_text(json.dumps(data))
     runner = _make_runner([_resp_finish()], config, base, tmp_path)
@@ -111,7 +111,7 @@ async def test_resume_refuses_drift_or_evaluation(tmp_path, changed):
 @pytest.mark.parametrize("stage", ["tool_inflight", "verifier_inflight"])
 async def test_resume_never_replays_uncertain_side_effects(tmp_path, stage):
     base, config, run_id, checkpoint = await interrupted_run(tmp_path)
-    data = json.loads(checkpoint.read_text())
+    data = json.loads(checkpoint.read_text(encoding="utf-8"))
     data["stage"] = stage
     checkpoint.write_text(json.dumps(data))
     runner = _make_runner([_resp_finish()], config, base, tmp_path)
@@ -171,7 +171,7 @@ async def test_artifact_quota_stops_admission_and_preserves_terminal_diagnostics
     assert result.termination_reason == "artifact_quota"
     assert result.budget["llm_requests"] == 0
     assert (Path(runner.sandbox.get_runs_dir(result.run_id)) / "result.json").is_file()
-    assert old.read_text() == "keep me"
+    assert old.read_text(encoding="utf-8") == "keep me"
 
 
 def test_capacity_counts_git_logs_and_unfiltered_physical_files(tmp_path):
@@ -241,7 +241,7 @@ async def test_actual_interrupted_tool_has_nonreplayable_checkpoint(tmp_path):
     with pytest.raises(Interrupted):
         await runner.run(_make_task())
     checkpoint = next((tmp_path / "runs").glob("*/checkpoint.json"))
-    assert json.loads(checkpoint.read_text())["stage"] == "tool_inflight"
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))["stage"] == "tool_inflight"
     resumed = _make_runner([_resp_finish()], config, base, tmp_path)
     with pytest.raises(ValueError, match="in-flight"):
         await resumed.resume(checkpoint.parent.name)
@@ -277,7 +277,7 @@ async def test_ready_boundary_restores_test_retry_and_repair_history(tmp_path):
     with pytest.raises(Interrupted):
         await runner.run(_make_task())
     checkpoint = next((tmp_path / "runs").glob("*/checkpoint.json"))
-    saved = json.loads(checkpoint.read_text())
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert saved["stage"] == "ready"
     assert saved["state"]["retry_count"] == 1
     assert saved["state"]["repair_required"]
@@ -356,4 +356,4 @@ async def test_new_run_id_collision_preserves_existing_evidence(tmp_path, monkey
     result = await runner.run(_make_task())
     assert result.status == "completed"
     assert result.run_id != "run_1234abcd"
-    assert old.read_text() == "historical evidence"
+    assert old.read_text(encoding="utf-8") == "historical evidence"

@@ -26,6 +26,9 @@ class AgentRunResult(BaseModel):
     error: str | None = None
     termination_reason: str | None = None
     execution_mode: str = "trusted_local"
+    acceptance_coverage: list[dict] = []
+    verification: dict | None = None
+    capabilities: dict = {"network_isolation": False}
     budget: dict = {}
     artifact_errors: list[str] = []
     recovery_file: str | None = None

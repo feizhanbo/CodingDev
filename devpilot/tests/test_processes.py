@@ -24,7 +24,7 @@ def test_output_limit_is_error_and_keeps_partial_log(tmp_path):
     )
     assert result.output_limited
     assert log.stat().st_size < 1100
-    assert "output limit exceeded" in log.read_text()
+    assert "output limit exceeded" in log.read_text(encoding="utf-8")
 
 
 def test_redaction_spans_stream_chunks(tmp_path):
@@ -43,8 +43,8 @@ def test_redaction_spans_stream_chunks(tmp_path):
         secrets=(key,),
     )
     assert result.exit_code == 0
-    assert key not in log.read_text()
-    assert "[REDACTED]" in log.read_text()
+    assert key not in log.read_text(encoding="utf-8")
+    assert "[REDACTED]" in log.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("parent_exits", [True, False])
@@ -69,9 +69,9 @@ def test_children_stop_on_parent_exit_or_timeout(tmp_path, parent_exits):
     )
     assert heartbeat.exists()
     assert result.timed_out is (not parent_exits)
-    first = heartbeat.read_text()
+    first = heartbeat.read_text(encoding="utf-8")
     time.sleep(0.2)
-    assert heartbeat.read_text() == first
+    assert heartbeat.read_text(encoding="utf-8") == first
 
 
 async def test_cancellation_waits_for_owned_process_cleanup(tmp_path):

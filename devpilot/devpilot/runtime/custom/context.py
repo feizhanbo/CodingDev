@@ -7,7 +7,7 @@ import json
 from devpilot.domain.state import DevPilotState, Observation
 from devpilot.domain.task import DevelopmentTask
 from devpilot.llm import build_system_prompt, tools_to_openai_format
-from devpilot.llm.base import LLMMessage
+from devpilot.llm.base import ContextBudgetExceeded, LLMMessage
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.tools.registry import ToolRegistry
 from devpilot.tracing import TraceWriter
@@ -63,7 +63,8 @@ class ContextBuilder:
         self.registry = registry
         self.trace_writer = trace_writer
         self.max_recent_observations = 10
-        self.max_context_chars = 30000
+        self.max_context_chars = config.max_context_chars
+        self.reserved_chars = 0
 
     def build(self, state: DevPilotState, workspace_path: str) -> list[LLMMessage]:
         """Build context messages for LLM based on current state."""
@@ -97,6 +98,41 @@ class ContextBuilder:
         if total_chars > self.max_context_chars or len(state.observations) > 20:
             messages = self._compress_context(messages, state)
 
+        return self._enforce_limit(messages, state)
+
+    def _enforce_limit(self, messages: list[LLMMessage], state: DevPilotState) -> list[LLMMessage]:
+        limit = self.max_context_chars - self.reserved_chars
+        before = sum(len(m.content) for m in messages)
+        remaining = list(state.observations)
+        retained = state.model_copy(deep=True)
+        required = []
+        if state.repair_required:
+            for obs in reversed(state.observations):
+                if obs.name == "test.run":
+                    if not obs.success:
+                        required.append(obs)
+                    break
+        if state.observations and state.observations[-1].name == "guardrail_feedback":
+            required.append(state.observations[-1])
+        while sum(len(m.content) for m in messages) > limit:
+            removable = next((i for i, obs in enumerate(remaining) if obs not in required), None)
+            if removable is None:
+                raise ContextBudgetExceeded("context_budget_exceeded")
+            remaining.pop(removable)
+            retained.observations = remaining
+            # Repair evidence has its own state field, independent of history.
+            for i, message in enumerate(messages):
+                if message.content.startswith("Current Phase:"):
+                    messages[i] = LLMMessage(role="user", content=self._build_state_content(retained))
+                    break
+        after = sum(len(m.content) for m in messages)
+        if after != before and self.trace_writer:
+            self.trace_writer.write_event(
+                state.run_id, state.total_steps, state.phase, "context_compacted",
+                data={"before_chars": before + self.reserved_chars,
+                      "after_chars": after + self.reserved_chars,
+                      "retained_observations": len(remaining), "reason": "context_budget"},
+            )
         return messages
 
     def _build_task_content(self, task: DevelopmentTask) -> str:
@@ -147,6 +183,15 @@ class ContextBuilder:
                     content += self._format_test_failure_block(failure)
                     emitted_test_failure = True
                 break
+
+        if "verification" in state.repair_sources and state.verification_report:
+            report = state.verification_report
+            content += "\n--- INDEPENDENT VERIFICATION FAILURE ---\n"
+            content += self._truncate(report.get("failure_reason") or "Verification rejected", 1500)
+            content += "\n" + self._format_observation_data(Observation(
+                step_id=state.total_steps, source="verifier", name="verification_failed",
+                success=False, summary="Verification rejected", data=report,
+            )) + "\n"
 
         # Repair requirement (when tests fail and need fixing)
         if state.repair_required and not emitted_test_failure:
@@ -349,12 +394,12 @@ class ContextBuilder:
         if name == "git.status":
             return f"[{data.get('modified_count', 0)} files modified]\n{data.get('status', '')}"
 
-        if name == "verification":
+        if name in {"verification_failed", "verification"}:
             checks = data.get("checks", [])
             lines = []
             for c in checks:
                 mark = "PASS" if c.get("passed") else "FAIL"
-                lines.append(f"  {mark}: {c.get('name', '')} - {c.get('detail', '')}")
+                lines.append(f"  {mark}: {c.get('name', '')} - {c.get('message', '')}")
             return "\n".join(lines) if lines else ""
 
         # Generic fallback: JSON dump truncated

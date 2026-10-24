@@ -29,6 +29,8 @@ class VerificationResult(BaseModel):
     success: bool
     checks: list[dict[str, Any]]
     failure_reason: str | None = None
+    coverage: list[dict] = []
+    evidence_ref: str | None = None
 
 
 class TaskVerifier:
@@ -198,7 +200,8 @@ class TaskVerifier:
         }
         failed = [c["message"] for c in checks if not c["passed"]]
         return VerificationResult(
-            success=not failed, checks=checks, failure_reason="; ".join(failed) if failed else None
+            success=not failed, checks=checks, failure_reason="; ".join(failed) if failed else None,
+            coverage=coverage_for(task, checks), evidence_ref=str(candidate.parent),
         )
 
     async def _check_visible_tests(
@@ -288,3 +291,27 @@ class TaskVerifier:
             "passed": False,
             "message": f"{count} files modified exceeds limit of {self.config.max_modified_files}",
         }
+
+
+def coverage_for(task: DevelopmentTask, checks: list[dict]) -> list[dict]:
+    by_name = {c["name"]: c for c in checks}
+    coverage = []
+    for index, criterion in enumerate(task.acceptance_criteria):
+        mapped = (
+            ["required_new_tests"]
+            if any(term in criterion.lower() for term in ("add tests", "新增测试", "新增回归测试"))
+            else []
+        )
+        available = [by_name[name] for name in mapped if name in by_name]
+        status = (
+            "uncovered" if not available
+            else "verified" if all(c["passed"] for c in available) else "failed"
+        )
+        coverage.append({
+            "index": index, "criterion": criterion, "checks": mapped,
+            "status": status,
+            "evidence_refs": [c.get("result", {}).get("report_file") for c in available
+                              if c.get("result", {}).get("report_file")],
+            "reason": "No deterministic check bound to this condition" if not available else None,
+        })
+    return coverage

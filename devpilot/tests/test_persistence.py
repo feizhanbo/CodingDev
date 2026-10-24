@@ -28,7 +28,7 @@ async def test_checkpoint_visible_before_next_decision(tmp_path):
 
     async def inspect(messages):
         checkpoint = next((tmp_path / "runs").glob("*/state.json"))
-        steps.append(json.loads(checkpoint.read_text())["total_steps"])
+        steps.append(json.loads(checkpoint.read_text(encoding="utf-8"))["total_steps"])
         return await decide(messages)
 
     runner.agent.decide = inspect
@@ -50,7 +50,7 @@ async def test_artifact_failure_keeps_recovery_result(tmp_path, monkeypatch):
     result = await runner.run(_make_task())
     assert result.artifact_errors
     assert Path(result.recovery_file).is_file()
-    saved = json.loads(Path(result.recovery_file).read_text())
+    saved = json.loads(Path(result.recovery_file).read_text(encoding="utf-8"))
     assert saved["result"]["run_id"] == result.run_id
 
 
@@ -68,7 +68,7 @@ async def test_quota_rejects_preparation(tmp_path):
 def test_atomic_write_and_known_secret_redaction(tmp_path):
     target = tmp_path / "state.json"
     atomic_write(target, redact('{"error":"synthetic-secret"}', ("synthetic-secret",)))
-    assert json.loads(target.read_text())["error"] == "[REDACTED]"
+    assert json.loads(target.read_text(encoding="utf-8"))["error"] == "[REDACTED]"
     assert list(tmp_path.iterdir()) == [target]
 
 

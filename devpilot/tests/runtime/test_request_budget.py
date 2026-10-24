@@ -45,7 +45,7 @@ async def test_failed_attempts_consume_request_budget(tmp_path):
     assert len(calls) == 2
     assert result.status == "failed"
     assert result.termination_reason == "max_llm_requests"
-    saved = json.loads((tmp_path / "runs" / result.run_id / "result.json").read_text())
+    saved = json.loads((tmp_path / "runs" / result.run_id / "result.json").read_text(encoding="utf-8"))
     assert saved["budget"]["llm_requests"] == 2
     assert result.total_steps == 0
 

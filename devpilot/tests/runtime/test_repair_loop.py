@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from tests.verifier_stub import PassingVerifier
 
 import pytest
 
@@ -280,7 +281,7 @@ def _make_repair_runner(
         context_builder=context_builder,
         loop_guard=guard,
         config=config,
-        verifier=None,
+        verifier=PassingVerifier(),
         trace_writer=trace_writer,
         metrics=metrics,
     )

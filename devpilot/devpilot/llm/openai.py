@@ -10,7 +10,7 @@ from typing import Any
 import openai
 
 from devpilot.domain.decision import AgentDecision
-from devpilot.llm.base import LLMClient, LLMMessage, LLMRequestRecord, LLMResponse
+from devpilot.llm.base import ContextBudgetExceeded, LLMClient, LLMMessage, LLMRequestRecord, LLMResponse
 from devpilot.llm.config import LLMConfig
 
 
@@ -76,6 +76,9 @@ class OpenAIClient(LLMClient):
                     "content": f"Available tools:\n{tools_desc}",
                 }
             )
+
+        if sum(len(m["content"]) for m in kwargs["messages"]) > self._config.max_context_chars:
+            raise ContextBudgetExceeded("context_budget_exceeded")
 
         start = time.monotonic()
         record = LLMRequestRecord(request_id=uuid.uuid4().hex, model=self._config.model)

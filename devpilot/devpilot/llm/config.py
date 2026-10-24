@@ -12,6 +12,7 @@ class LLMConfig(BaseSettings):
     api_key: str = ""
     base_url: str | None = None
     max_tokens: int = 4096
+    max_context_chars: int = 30000
     temperature: float = 0.0
 
     model_config = SettingsConfigDict(env_prefix="DEVPILOT_", env_file=".env", extra="ignore")

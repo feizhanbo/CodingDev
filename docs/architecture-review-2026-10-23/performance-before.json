@@ -1,0 +1,187 @@
+{
+  "scenario": "read_file then finish with unit verifier boundary",
+  "samples": [
+    {
+      "seconds": 1.163494600001286,
+      "checkpoint_seconds": 0.37324709999302286,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 0.9509923000005074,
+      "checkpoint_seconds": 0.33879370000067865,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.0046055000020715,
+      "checkpoint_seconds": 0.37699039998915396,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.0249903000003542,
+      "checkpoint_seconds": 0.3272441999943112,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 0.9834239000010712,
+      "checkpoint_seconds": 0.3406247999955667,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 0.9803103000012925,
+      "checkpoint_seconds": 0.36846130000049016,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 0.9687597999982245,
+      "checkpoint_seconds": 0.32744249999450403,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 0.9745626999974775,
+      "checkpoint_seconds": 0.34292849999837927,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.0218655999997281,
+      "checkpoint_seconds": 0.37039739999818266,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.1507399000001897,
+      "checkpoint_seconds": 0.34491540000090026,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 0.9974163000006229,
+      "checkpoint_seconds": 0.3411567000002833,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.0145942000017385,
+      "checkpoint_seconds": 0.35962210000434425,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 0.9461095000006026,
+      "checkpoint_seconds": 0.3358005000045523,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.2930640999984462,
+      "checkpoint_seconds": 0.5478399000021454,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.387688499999058,
+      "checkpoint_seconds": 0.4407028000023274,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.1495384000008926,
+      "checkpoint_seconds": 0.4099876000000222,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.2136523999979545,
+      "checkpoint_seconds": 0.4794704999985697,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.284131600001274,
+      "checkpoint_seconds": 0.4580848999976297,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.0330623999980162,
+      "checkpoint_seconds": 0.3347185000020545,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    },
+    {
+      "seconds": 1.0372805000006338,
+      "checkpoint_seconds": 0.336321400001907,
+      "requests": 2,
+      "steps": 1,
+      "tools": [
+        "repo.read_file"
+      ]
+    }
+  ],
+  "median": 1.0234279500000412,
+  "p95": 1.2930640999984462
+}

@@ -17,25 +17,21 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._aliases: dict[str, str] = {}
 
     def register(self, tool: Tool) -> None:
         """Register a tool. Raises ``ValueError`` if the name is taken."""
+        aliases = {tool.name, tool.name.replace(".", "_")}
         if tool.name in self._tools:
             raise ValueError(f"Tool '{tool.name}' is already registered")
+        if aliases & self._aliases.keys():
+            raise ValueError(f"Tool name/alias collision: {tool.name}")
         self._tools[tool.name] = tool
+        for alias in aliases:
+            self._aliases[alias] = tool.name
 
     def get(self, name: str) -> Tool | None:
-        """Return the tool registered under *name*, or ``None``.
-
-        Accepts both dot-separated (``repo.list_files``) and
-        underscore-separated (``repo_list_files``) names.
-        """
-        tool = self._tools.get(name)
-        if tool is not None:
-            return tool
-        # Try converting underscores to dots (LLM may use safe names)
-        alt_name = name.replace("_", ".", 1) if "_" in name else name
-        return self._tools.get(alt_name)
+        return self._tools.get(self._aliases.get(name, name))
 
     def canonical_name(self, name: str) -> str:
         tool = self.get(name)

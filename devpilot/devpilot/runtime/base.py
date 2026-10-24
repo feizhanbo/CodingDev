@@ -36,9 +36,22 @@ class RuntimeConfig:
     max_llm_requests: int = 90
     llm_timeout_seconds: float = 120
     max_run_seconds: float = 1800
+    max_context_chars: int = 30000
+    tool_timeout_seconds: int = 120
+    max_tool_output_bytes: int = 2097152
+    preparation_timeout_seconds: int = 120
+    evaluation_timeout_seconds: int = 120
+    diagnostic_reserve_bytes: int = 8388608
+
 
     def __post_init__(self) -> None:
         for name in (
+            "max_context_chars",
+            "tool_timeout_seconds",
+            "max_tool_output_bytes",
+            "preparation_timeout_seconds",
+            "evaluation_timeout_seconds",
+            "diagnostic_reserve_bytes",
             "max_steps",
             "max_modified_files",
             "max_patch_failures",

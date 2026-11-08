@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from tests.verifier_stub import PassingVerifier
 
 from devpilot.agents.developer import DeveloperAgent
 from devpilot.domain.decision import AgentDecision, FinishIntent, ToolAction
@@ -21,6 +20,7 @@ from devpilot.tools.git import GitDiff, GitStatus
 from devpilot.tools.repo import ListFiles, ReadFile, SearchCode
 from devpilot.tools.test import RunTests
 from devpilot.workspace.sandbox import SandboxWorkspace
+from tests.verifier_stub import PassingVerifier
 
 
 def _write(path: Path, content: str) -> None:
@@ -299,7 +299,7 @@ async def test_snapshot_failure_saves_failed_artifacts(tmp_path: Path, monkeypat
         raise ValueError("trusted snapshot unavailable")
 
     monkeypatch.setattr(
-        "devpilot.runtime.custom.runner.capture_snapshot", fail_snapshot
+        "devpilot.runtime.shared.lifecycle.capture_snapshot", fail_snapshot
     )
     result = await runner.run(_make_task())
     assert result.status == "failed"

@@ -7,12 +7,13 @@ import logging
 import os
 import shutil
 import stat
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from devpilot.execution import copy_file
+from devpilot.processes import capture_process
 from devpilot.security import linked, permitted_files, redact
-from devpilot.storage import ArtifactQuotaExceeded, atomic_write, tree_bytes
+from devpilot.storage import ArtifactQuotaExceeded, CapacityReservation, atomic_write, tree_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class SandboxWorkspace:
         self.secrets: tuple[str, ...] = ()
         self.max_bytes = 268435456
         self.total_max_bytes = 2147483648
+        self.diagnostic_reserve_bytes = 8388608
         self.artifacts_max_bytes = 536870912
         self.artifacts_total_max_bytes = 4294967296
         self.base_repo = Path(base_repo_path).resolve()
@@ -61,7 +63,7 @@ class SandboxWorkspace:
                 continue
             target = workspace_repo / source.relative_to(self.base_repo)
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
+            copy_file(source, target)
 
         # 3. Initialize a fresh git repo in the workspace.
         _git_init(workspace_repo)
@@ -78,9 +80,7 @@ class SandboxWorkspace:
             "workspace_path": str(workspace_repo),
             "symlinks_detected": symlinks,
         }
-        (runs_dir / "workspace-metadata.json").write_text(
-            json.dumps(metadata, indent=2), encoding="utf-8"
-        )
+        self.save_artifact(run_id, "workspace-metadata.json", json.dumps(metadata, indent=2))
 
         # 7. Return the workspace repo path.
         return str(workspace_repo)
@@ -89,9 +89,7 @@ class SandboxWorkspace:
         if source_bytes > self.max_bytes:
             raise OSError("Workspace exceeds workspace_max_bytes")
         if self.workspace_root.exists():
-            used = sum(
-                p.stat().st_size for p in permitted_files(self.workspace_root, self.workspace_root)
-            )
+            used = tree_bytes(self.workspace_root)
             if used + source_bytes > self.total_max_bytes:
                 raise OSError("Workspaces exceed workspace_total_max_bytes; archive manually")
 
@@ -100,10 +98,31 @@ class SandboxWorkspace:
         return str(self.workspace_root / run_id / "repo")
 
     def check_artifacts(self, run_id: str, reserve: int = 0) -> None:
-        if tree_bytes(Path(self.get_runs_dir(run_id))) + reserve > self.artifacts_max_bytes:
+        if tree_bytes(Path(self.get_runs_dir(run_id))) + reserve > max(
+            0, self.artifacts_max_bytes - self.diagnostic_reserve_bytes
+        ):
             raise ArtifactQuotaExceeded("run_artifacts_max_bytes")
         if tree_bytes(self.runs_root) + reserve > self.artifacts_total_max_bytes:
             raise ArtifactQuotaExceeded("runs_total_max_bytes")
+
+    def admit_workspace(self, run_id, reserve=0):
+        return CapacityReservation(
+            self.workspace_root,
+            Path(self.get_repo_path(run_id)).parent,
+            self.total_max_bytes,
+            self.max_bytes,
+            reserve,
+        )
+
+    def admit_artifacts(self, run_id, reserve=0, *, diagnostic=False):
+        allowance = 0 if diagnostic else self.diagnostic_reserve_bytes
+        return CapacityReservation(
+            self.runs_root,
+            Path(self.get_runs_dir(run_id)),
+            self.artifacts_total_max_bytes,
+            max(0, self.artifacts_max_bytes - allowance),
+            reserve,
+        )
 
     def get_runs_dir(self, run_id: str) -> str:
         """Return the runs directory path for a run."""
@@ -122,17 +141,12 @@ class SandboxWorkspace:
             raise PermissionError("Artifact escapes runs root")
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         safe = content if artifact_path.suffix == ".diff" else redact(content, self.secrets)
-        # Preserve small failure/checkpoint diagnostics even after admission is refused.
-        diagnostics = {
-            "state.json",
-            "checkpoint.json",
-            "result.json",
-            "llm-requests.json",
-            "eval_result.json",
-        }
-        if name not in diagnostics:
-            self.check_artifacts(run_id, len(safe.encode("utf-8")))
-        atomic_write(artifact_path, safe)
+        diagnostic = name in {"failure.json", "result.json", "eval_result.json"}
+        size = len(safe.encode("utf-8"))
+        # The old file remains present until replace: the entire temporary file
+        # must fit, even when replacing an equal-sized checkpoint.
+        with self.admit_artifacts(run_id, size, diagnostic=diagnostic):
+            atomic_write(artifact_path, safe)
         return str(artifact_path)
 
     def destroy(self, run_id: str) -> None:
@@ -194,7 +208,7 @@ def _git_init(repo_path: Path) -> None:
 
 def _git(repo: Path, *args: str) -> str:
     """Run a git command in *repo*, returning stdout."""
-    result = subprocess.run(
+    result = capture_process(
         ["git", *args],
         cwd=str(repo),
         capture_output=True,

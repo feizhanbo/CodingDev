@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import codecs
 import ctypes
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import which as resolve_executable
 
 from devpilot.security import redact
+from devpilot.storage import ArtifactQuotaExceeded, active_capacity, check_active_capacity
 
 
 class WindowsJob:
@@ -93,6 +96,12 @@ class ProcessResult:
     timed_out: bool = False
     output_limited: bool = False
     cancelled: bool = False
+    stdout: str = ""
+    stderr: str = ""
+
+    @property
+    def returncode(self):
+        return self.exit_code
 
 
 def run_process(
@@ -105,48 +114,54 @@ def run_process(
     output_limit: int = 2097152,
     secrets: tuple[str, ...] = (),
     cancel: threading.Event | None = None,
+    stdin: bytes | None = None,
 ) -> ProcessResult:
-    """Stream stdout to a capped log; clean up children even if the parent exits first."""
+    """Own the process tree until exit; cap combined UTF-8 output on both streams."""
     if timeout <= 0 or output_limit <= 0:
         raise ValueError("Process limits must be positive")
     log.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     limited = threading.Event()
-    read_errors: list[BaseException] = []
+    errors = []
+    lock = threading.Lock()
+    used = 0
+    quota = active_capacity.get()
+    output = [[], []]
     options = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
         if os.name == "nt"
         else {"start_new_session": True}
     )
     launch = command
+    payload = stdin or b""
     if os.name == "nt":
-        executable = shutil.which(command[0], path=env.get("PATH"))
+        executable = resolve_executable(command[0], path=env.get("PATH"))
         if executable is None:
-            raise FileNotFoundError("Test interpreter not found")
+            raise FileNotFoundError(f"Executable not found: {command[0]}")
         command = [executable, *command[1:]]
-        # The trusted bootstrap waits before launching target code, closing the race
-        # between CreateProcess and job assignment. No candidate executes outside the job.
+        # Target code cannot execute until Job assignment succeeds.
         launch = [
             sys.executable,
             "-I",
             "-c",
-            "import json,subprocess,sys;"
-            "cmd=json.loads(sys.stdin.buffer.readline());"
-            "sys.exit(subprocess.call(cmd,stdin=subprocess.DEVNULL))",
+            "import base64,json,subprocess,sys;"
+            "cmd,data=json.loads(sys.stdin.buffer.readline());"
+            "sys.exit(subprocess.run(cmd,input=base64.b64decode(data)).returncode)",
         ]
+        payload = (json.dumps([command, base64.b64encode(payload).decode()]) + "\n").encode()
     proc = subprocess.Popen(
         launch,
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.PIPE if os.name == "nt" else subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE,
         **options,
     )
     job = None
     closed = False
 
-    def stop_tree() -> None:
+    def stop_tree():
         nonlocal closed
         if closed:
             return
@@ -160,87 +175,153 @@ def run_process(
             with suppress(ProcessLookupError):
                 proc.kill()
 
-    def consume() -> None:
+    def feed():
+        try:
+            proc.stdin.write(payload)
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            proc.stdin.close()
+
+    marker = b"\n[output limit exceeded]\n"
+    capacity = max(0, output_limit - len(marker))
+    handle = None
+
+    def consume(pipe, index):
+        nonlocal used
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         pending = ""
-        keep = max(0, max((len(s) for s in secrets), default=1) - 1)
-        used = 0
-        written = 0
+        keep = max((len(secret) for secret in secrets), default=1) - 1
+
+        def emit(value):
+            nonlocal used
+            data = value.encode("utf-8")
+            with lock:
+                available = max(0, capacity - used)
+                accepted = data[:available].decode("utf-8", errors="ignore")
+                encoded = accepted.encode("utf-8")
+                if quota is not None:
+                    quota.check(len(encoded))
+                handle.write(encoded)
+                handle.flush()
+                output[index].append(accepted)
+                used += len(encoded)
+                if len(data) > available:
+                    limited.set()
+
         try:
-            with log.open("w", encoding="utf-8", newline="") as handle:
-
-                def write_bounded(text: str) -> None:
-                    nonlocal written
-                    encoded = text.encode("utf-8")
-                    remaining = output_limit - written
-                    safe = encoded[:remaining].decode("utf-8", errors="ignore")
-                    handle.write(safe)
-                    written += len(safe.encode("utf-8"))
-                    if len(encoded) > remaining:
-                        limited.set()
-
-                while block := proc.stdout.read1(8192):
-                    available = output_limit - used
-                    accepted = block[:available]
-                    used += len(accepted)
-                    pending = redact(pending + decoder.decode(accepted), secrets)
-                    end = max(0, len(pending) - keep)
-                    write_bounded(pending[:end])
-                    pending = pending[end:]
-                    handle.flush()
-                    if len(block) > available or limited.is_set():
-                        limited.set()
-                        break
-                write_bounded(redact(pending + decoder.decode(b"", final=True), secrets))
+            while block := pipe.read1(8192):
+                pending = redact(pending + decoder.decode(block), secrets)
+                boundary = max(0, len(pending) - keep)
+                emit(pending[:boundary])
+                pending = pending[boundary:]
                 if limited.is_set():
-                    handle.write("\n[output limit exceeded]\n")
+                    break
+            emit(redact(pending + decoder.decode(b"", final=True), secrets))
         except BaseException as exc:
-            read_errors.append(exc)
+            errors.append(exc)
             limited.set()
 
-    reader = threading.Thread(target=consume, daemon=True)
+    readers = [
+        threading.Thread(target=consume, args=(pipe, index), daemon=True)
+        for index, pipe in enumerate((proc.stdout, proc.stderr))
+    ]
+    writer = threading.Thread(target=feed, daemon=True)
     result = ProcessResult(-1, 0)
     try:
         if os.name == "nt":
             job = WindowsJob(proc.pid)
-            if time.monotonic() - started >= timeout or (cancel is not None and cancel.is_set()):
-                stop_tree()
-            else:
-                proc.stdin.write((json.dumps(command) + "\n").encode("utf-8"))
-            proc.stdin.close()
-        reader.start()
+        handle = log.open("wb")
+        for reader in readers:
+            reader.start()
+        writer.start()
         while True:
+            check_active_capacity()
             result.timed_out = time.monotonic() - started >= timeout
             result.cancelled = cancel is not None and cancel.is_set()
             result.output_limited = limited.is_set()
-            if result.timed_out or result.cancelled or result.output_limited:
+            if (
+                result.timed_out
+                or result.cancelled
+                or result.output_limited
+                or proc.poll() is not None
+            ):
                 stop_tree()
                 break
-            if proc.poll() is not None:
-                stop_tree()
-                break
-            time.sleep(0.02)
+            time.sleep(0.01)
         proc.wait(timeout=5)
-        reader.join(timeout=5)
-        if reader.is_alive():
-            raise RuntimeError("Process output reader did not stop after tree cleanup")
-        if read_errors:
-            raise OSError("Cannot persist process output") from read_errors[0]
+        for thread in [writer, *readers]:
+            thread.join(timeout=5)
+        if any(thread.is_alive() for thread in [writer, *readers]):
+            raise RuntimeError("manual_recovery_required: process I/O did not stop")
+        if errors and isinstance(errors[0], ArtifactQuotaExceeded):
+            raise errors[0]
+        if errors:
+            raise OSError("Cannot persist process output") from errors[0]
         result.output_limited = limited.is_set()
+        if result.output_limited:
+            handle.write(marker[: max(0, output_limit - used)])
         result.exit_code = proc.returncode
+        result.stdout, result.stderr = ("".join(parts) for parts in output)
         result.duration_ms = int((time.monotonic() - started) * 1000)
         return result
     finally:
         stop_tree()
         proc.wait(timeout=5)
-        if reader.ident:
-            reader.join(timeout=5)
-        # An escaped/hostile descendant can hold the pipe open outside our process group.
-        # Never block forever acquiring a BufferedReader lock from its daemon reader.
-        if not reader.is_alive():
-            proc.stdout.close()
-        if proc.stdin is not None:
-            proc.stdin.close()
+        for thread in [writer, *readers]:
+            if thread.ident:
+                thread.join(timeout=5)
+        if not any(thread.is_alive() for thread in [writer, *readers]):
+            for pipe in (proc.stdout, proc.stderr, proc.stdin):
+                pipe.close()
+            if handle:
+                handle.close()
+
+
+def capture_process(
+    command, *, cwd, stdin=None, timeout=120, output_limit=None, env=None, cancel=None, **compat
+):
+    """Bounded capture for Git/rg, with the same lifetime contract as pytest."""
+    from devpilot.execution import current_policy, execution_scope, remaining
+    from devpilot.security import process_environment
+
+    with execution_scope(cancel=cancel or current_policy.get().cancel):
+        policy = current_policy.get()
+        from contextlib import nullcontext
+
+        quota = active_capacity.get()
+        scope = (
+            nullcontext(quota.directory / "process-logs")
+            if quota is not None
+            else tempfile.TemporaryDirectory(prefix="devpilot-process-")
+        )
+        with scope as directory:
+            import uuid
+
+            result = run_process(
+                command,
+                cwd=Path(cwd),
+                env=env or process_environment(),
+                log=Path(directory) / f"{uuid.uuid4().hex}.log",
+                stdin=stdin,
+                timeout=remaining(timeout),
+                output_limit=output_limit or policy.output_limit,
+                cancel=policy.cancel,
+            )
+        if result.timed_out or result.cancelled:
+            raise TimeoutError(policy.timeout_reason)
+        if result.output_limited:
+            raise ValueError("process_output_limit_exceeded: complete output required")
+        if compat.get("check") and result.returncode:
+            raise subprocess.CalledProcessError(
+                result.returncode, command, result.stdout, result.stderr
+            )
+        return result
+
+
+async def capture_process_async(command, **kwargs):
+    return await run_cancellable(capture_process, command, **kwargs)
 
 
 async def run_process_async(command: list[str], **kwargs) -> ProcessResult:
@@ -248,12 +329,35 @@ async def run_process_async(command: list[str], **kwargs) -> ProcessResult:
 
 
 async def run_cancellable(function, *args, **kwargs):
-    """Wait for worker cleanup on cancellation instead of abandoning a background thread."""
+    """Do not abandon a worker on cancellation, including repeated cancellation."""
     cancel = threading.Event()
     worker = asyncio.create_task(asyncio.to_thread(function, *args, cancel=cancel, **kwargs))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
         cancel.set()
-        await asyncio.shield(worker)
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        # Retrieve exceptions; the original cancellation remains authoritative.
+        if not worker.cancelled():
+            worker.exception()
         raise
+
+
+async def run_sync(function, *args, **kwargs):
+    """Cooperative synchronous operation; cleanup finishes before cancellation returns."""
+    from devpilot.execution import check_execution, execution_scope
+
+    def execute(*, cancel):
+        with execution_scope(cancel=cancel):
+            check_execution()
+            result = function(*args, **kwargs)
+            check_execution()
+            return result
+
+    return await run_cancellable(execute)

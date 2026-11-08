@@ -6,15 +6,16 @@ protect against test editing, not arbitrary hostile code on the same host.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
-import subprocess
 import uuid
 from pathlib import Path
 
+from devpilot.execution import check_execution, copy_file
+from devpilot.processes import capture_process
 from devpilot.security import forbidden
+from devpilot.tools.repo.streaming import content_digest
 
 CONFIG_NAMES = {
     "conftest.py",
@@ -48,14 +49,13 @@ def inventory(root: Path) -> dict[str, str]:
                     f"Linked workspace path is not permitted: {path.relative_to(root)}"
                 )
         for name in names:
+            check_execution()
             if name.endswith((".pyc", ".pyo", ".db", ".db-journal")):
                 continue
             path = Path(directory) / name
             if forbidden(path.relative_to(root).as_posix()):
                 raise PermissionError(f"Forbidden workspace file: {path.relative_to(root)}")
-            hashes[path.relative_to(root).as_posix()] = hashlib.sha256(
-                path.read_bytes()
-            ).hexdigest()
+            hashes[path.relative_to(root).as_posix()] = content_digest(path)
     return hashes
 
 
@@ -66,7 +66,7 @@ def capture_snapshot(repo: Path, artifacts: Path) -> Path:
     for relative in hashes:
         target = destination / "baseline" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(repo / relative, target)
+        copy_file(repo / relative, target)
     (destination / "manifest.json").write_text(
         json.dumps(
             {
@@ -128,8 +128,8 @@ def materialize_candidate(
     for relative in current:
         target = b / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(repo / relative, target)
-    process = subprocess.run(
+        copy_file(repo / relative, target)
+    process = capture_process(
         [
             "git",
             "diff",

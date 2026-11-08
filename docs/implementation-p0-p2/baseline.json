@@ -1,0 +1,14 @@
+{
+  "head": "41b027b4860354f69205ed7895de044b7f2bd39e",
+  "python": "3.12.13 (main, Apr 14 2026, 14:31:26) [MSC v.1944 64 bit (AMD64)]",
+  "executable": "G:\\program\\CodingDev\\devpilot\\.venv\\Scripts\\python.exe",
+  "lock_sha256": "472a127d51779083ffec4716f9547885b11d1ce7929c61f5eae4079ff62ea2bd",
+  "dataset": "v1.1",
+  "dependencies": {
+    "pydantic": "2.13.4",
+    "openai": "3.5.0",
+    "pytest": "9.1.1",
+    "ruff": "0.16.4"
+  },
+  "prior_evidence": "../architecture-review-2026-10-24/06-validation.md"
+}

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import NamedTuple
 
 from pydantic import BaseModel
 
+from devpilot.processes import capture_process_async
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
@@ -67,6 +67,8 @@ constraints:
                 )
 
         patch_bytes = patch_text.encode("utf-8")
+        if len(patch_bytes) > ctx.max_output_bytes:
+            raise ValueError("patch_content_limit_exceeded: complete patch required")
         # Ask Git for its authoritative target paths, including binary changes.
         stat = await _run_git(
             ["git", "apply", "--numstat", "-z", "-"], cwd=ctx.workspace_root, stdin=patch_bytes
@@ -79,9 +81,13 @@ constraints:
                 success=False, error="Patch has no target files", data={"modified_files": []}
             )
         originals = {}
+        original_bytes = 0
         for target in targets:
             resolved = guard.validate_path(target)
             validate_write(Path(ctx.workspace_root), target, ctx.trusted_root)
+            original_bytes += resolved.stat().st_size if resolved.exists() else 0
+            if original_bytes > ctx.max_output_bytes:
+                raise ValueError("patch_content_limit_exceeded: complete rollback content required")
             originals[resolved] = resolved.read_bytes() if resolved.exists() else None
         last_error = "patch failed"
         try:
@@ -122,35 +128,15 @@ class _GitResult(NamedTuple):
 
 async def _run_git(cmd: list[str], cwd: str, stdin: bytes | None = None) -> _GitResult:
     """Run a git subprocess, returning decoded stdout/stderr."""
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-    )
-    stdout, stderr = await proc.communicate(input=stdin)
-    return _GitResult(
-        returncode=proc.returncode if proc.returncode is not None else 0,
-        stdout=stdout.decode(errors="replace"),
-        stderr=stderr.decode(errors="replace"),
-    )
+    result = await capture_process_async(cmd, cwd=cwd, stdin=stdin)
+    return _GitResult(result.returncode, result.stdout, result.stderr)
 
 
 async def _modified_files(workspace_root: str) -> list[str]:
-    """Return workspace-relative paths of files changed in the worktree."""
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        "diff",
-        "HEAD",
-        "--name-only",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=workspace_root,
-    )
-    stdout, _ = await proc.communicate()
-    files = [line.strip() for line in stdout.decode(errors="replace").splitlines() if line.strip()]
-    return files
+    result = await _run_git(["git", "diff", "HEAD", "--name-only"], workspace_root)
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def _extract_paths(patch: str) -> list[str]:

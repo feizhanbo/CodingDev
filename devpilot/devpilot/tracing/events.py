@@ -22,6 +22,7 @@ class TraceEvent(BaseModel):
     arguments_summary: str | None = None
     timestamp: str = ""
     data: dict[str, Any] | None = None
+    event_id: str | None = None
 
     def model_post_init(self, __context: Any) -> None:  # noqa: ARG002
         if not self.timestamp:

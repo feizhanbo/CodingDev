@@ -1,0 +1,17 @@
+...........F..............................                               [100%]
+================================== FAILURES ===================================
+_________ test_interrupted_third_attempt_cannot_restart_retry_budget __________
+tests\runtime\test_recovery.py:144: in test_interrupted_third_attempt_cannot_restart_retry_budget
+    result = await resumed.resume(run_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+devpilot\runtime\custom\runner.py:173: in resume
+    validate_run_id(run_id)
+devpilot\runtime\custom\recovery.py:49: in validate_run_id
+    raise ValueError("Invalid run ID")
+E   ValueError: Invalid run ID
+------------------------------ Captured log call ------------------------------
+WARNING  root:runner.py:335 LLM call attempt 1 failed: ValueError, retrying...
+WARNING  root:runner.py:335 LLM call attempt 2 failed: ValueError, retrying...
+=========================== short test summary info ===========================
+FAILED tests/runtime/test_recovery.py::test_interrupted_third_attempt_cannot_restart_retry_budget
+1 failed, 41 passed in 278.52s (0:04:38)

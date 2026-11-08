@@ -1,0 +1,5 @@
+ss                                                                       [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_file_security.py:89: symlinks unavailable on this platform
+SKIPPED [1] tests\tools\test_path_guard.py:61: symlinks not supported on this platform
+2 skipped, 16 deselected in 3.46s

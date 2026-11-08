@@ -100,13 +100,25 @@ def registry() -> ToolRegistry:
 @pytest.fixture(autouse=True)
 def forbid_paid_model_requests(monkeypatch):
     """Fail before transport if a test accidentally uses a real model."""
+    import httpx
+    import requests
     from openai.resources.chat.completions import AsyncCompletions, Completions
 
+    attempts = []
+
     async def blocked_async(*args, **kwargs):
+        attempts.append("async")
         raise AssertionError("Real model requests are forbidden in tests")
 
     def blocked(*args, **kwargs):
+        attempts.append("sync")
         raise AssertionError("Real model requests are forbidden in tests")
 
     monkeypatch.setattr(AsyncCompletions, "create", blocked_async)
     monkeypatch.setattr(Completions, "create", blocked)
+    # Alternate SDK endpoints and tracing must not bypass the model API guards.
+    # Explicit httpx.MockTransport fixtures do not use these network transports.
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_async)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", blocked)
+    monkeypatch.setattr(requests.Session, "send", blocked)
+    return attempts

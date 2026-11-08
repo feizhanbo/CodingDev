@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
 
 
@@ -24,7 +26,12 @@ def tree_bytes(root: Path) -> int:
             if path.is_symlink() or path.is_junction():
                 raise PermissionError(f"Linked artifact path: {path}")
         for name in names:
-            total += (Path(directory) / name).stat().st_size
+            try:
+                total += (Path(directory) / name).stat().st_size
+            except FileNotFoundError:
+                # Git/pytest may remove a transient file during a live capacity scan.
+                # Admission also checks again after the owned process has exited.
+                continue
     return total
 
 
@@ -83,3 +90,80 @@ def atomic_write(path: Path, content: str) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+active_capacity: ContextVar = ContextVar("active_capacity", default=None)
+
+
+class CapacityReservation:
+    """Serialize capacity admission across processes and reconcile stale reservations.
+
+    The kernel lock is authoritative. A journal surviving process death is reclaimed
+    only after physical files have been counted under that lock. This is cooperative
+    admission control, not a hard disk sandbox for arbitrary candidate code.
+    """
+
+    def __init__(self, root, directory, total_limit, run_limit, reserve=0):
+        self.root, self.directory = Path(root), Path(directory)
+        self.total_limit, self.run_limit = total_limit, run_limit
+        self.reserve = reserve
+        self.lock = RunLock(self.root / ".capacity.lock")
+        self.journal = self.root / ".capacity-reservation.json"
+        self.token = None
+        self.nested = False
+        self.parent = None
+
+    def check(self, extra=0):
+        if self.parent is not None:
+            self.parent.check()
+        if tree_bytes(self.directory) + extra > self.run_limit:
+            raise ArtifactQuotaExceeded("run_capacity_exceeded")
+        if tree_bytes(self.root) + extra > self.total_limit:
+            raise ArtifactQuotaExceeded("shared_capacity_exceeded")
+
+    def __enter__(self):
+        active = active_capacity.get()
+        if active is not None and active.root == self.root:
+            active.check(self.reserve)
+            self.nested = True
+            return active
+        self.parent = active
+        try:
+            self.lock.__enter__()
+        except RuntimeError as exc:
+            raise ArtifactQuotaExceeded("shared_capacity_busy; retry admission later") from exc
+        try:
+            # Reconcile actual files before reclaiming any stale reservation.
+            self.check(self.reserve + 512)
+            atomic_write(
+                self.journal,
+                json.dumps(
+                    {"pid": os.getpid(), "directory": str(self.directory), "bytes": self.reserve}
+                ),
+            )
+            self.token = active_capacity.set(self)
+            return self
+        except BaseException:
+            self.lock.__exit__()
+            raise
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.nested:
+            return
+        try:
+            if exc_type is None:
+                self.check()
+        finally:
+            if self.token is not None:
+                active_capacity.reset(self.token)
+            try:
+                # Remove only our bookkeeping record, never run evidence.
+                self.journal.unlink(missing_ok=True)
+            finally:
+                self.lock.__exit__()
+
+
+def check_active_capacity():
+    active = active_capacity.get()
+    if active is not None:
+        active.check()

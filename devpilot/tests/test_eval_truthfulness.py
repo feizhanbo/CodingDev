@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from devpilot.cli import initialize_components
+from devpilot.application.runtime import CustomRuntime
+from devpilot.cli import initialize_components, smoke_repository
 from devpilot.evals.runner import EvalRunner
 from devpilot.settings import Settings
 
 
+@pytest.mark.parametrize("backend", ["custom", "langgraph"])
 @pytest.mark.parametrize(
     "test_code,status,success",
     [
@@ -26,7 +28,7 @@ from devpilot.settings import Settings
     ],
 )
 async def test_capability_verdict_requires_trusted_evidence(
-    tmp_path, monkeypatch, test_code, status, success
+    tmp_path, monkeypatch, test_code, status, success, backend
 ):
     issues = tmp_path / "issues"
     issues.mkdir()
@@ -40,17 +42,20 @@ async def test_capability_verdict_requires_trusted_evidence(
         (hidden / "DEV-001").mkdir(parents=True)
         (hidden / "DEV-001/test_hidden.py").write_text(test_code, encoding="utf-8")
     settings = Settings(
-        _env_file=None, workspace_root=str(tmp_path / "ws"), runs_root=str(tmp_path / "runs")
+        _env_file=None, runtime=backend,
+        workspace_root=str(tmp_path / "ws"), runs_root=str(tmp_path / "runs")
     )
     evaluator = EvalRunner(
-        str(tmp_path), issues_dir=str(issues), hidden_tests_dir=str(hidden), settings=settings
+        smoke_repository(), issues_dir=str(issues), hidden_tests_dir=str(hidden), settings=settings
     )
     # Inject a scripted model at the composition boundary, while exercising all
     # production capability evidence collection and verdict logic.
     monkeypatch.setattr(
         evaluator,
         "_init_components",
-        lambda **kwargs: initialize_components(fake=True, settings=settings),
+        lambda **kwargs: CustomRuntime(
+            factory=lambda **options: initialize_components(fake=True, settings=settings)
+        ),
     )
     result = await evaluator.run_eval("DEV-001", fake=False)
     assert result.evaluation_status == status, result

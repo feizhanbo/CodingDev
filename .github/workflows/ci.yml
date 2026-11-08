@@ -39,7 +39,7 @@ jobs:
         working-directory: devpilot
         run: uv build --wheel
       - name: Verify installed wheel outside source
-        run: uv run --project devpilot python scripts/check_wheel.py
+        run: uv run --project devpilot python scripts/check_wheel.py --allow-download
       - uses: actions/upload-artifact@v4
         if: always()
         with:

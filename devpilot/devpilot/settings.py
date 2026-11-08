@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +29,8 @@ class Settings(BaseSettings):
     )
 
     model: str = "gpt-4o"
+    llm_backend: Literal["openai", "langchain"] = "langchain"
+    runtime: Literal["custom", "langgraph"] = "langgraph"
     api_key: str = Field(default="", repr=False)
     base_url: str | None = None
     max_tokens: int = Field(default=4096, gt=0)

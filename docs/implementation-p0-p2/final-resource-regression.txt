@@ -1,0 +1,35 @@
+.................F......FF.....................F........................ [ 55%]
+.........s...............................................                [100%]
+================================== FAILURES ===================================
+___________ test_evaluation_budget_is_cumulative_across_rejections ____________
+tests\test_p0_p2_boundaries.py:161: in test_evaluation_budget_is_cumulative_across_rejections
+    assert len(calls) == 2
+E   assert 1 == 2
+E    +  where 1 = len([1])
+____ test_resume_preserves_workspace_steps_budget_guard_and_unknown_usage _____
+tests\runtime\test_recovery.py:56: in test_resume_preserves_workspace_steps_budget_guard_and_unknown_usage
+    result = await runner.resume(run_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+devpilot\runtime\custom\runner.py:210: in resume
+    raise ValueError("Runtime/config/provider changed; resume refused")
+E   ValueError: Runtime/config/provider changed; resume refused
+___________________ test_resume_request_limit_is_not_reset ____________________
+tests\runtime\test_recovery.py:77: in test_resume_request_limit_is_not_reset
+    result = await runner.resume(run_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+devpilot\runtime\custom\runner.py:210: in resume
+    raise ValueError("Runtime/config/provider changed; resume refused")
+E   ValueError: Runtime/config/provider changed; resume refused
+_________ test_ready_boundary_restores_test_retry_and_repair_history __________
+tests\runtime\test_recovery.py:296: in test_ready_boundary_restores_test_retry_and_repair_history
+    result = await resumed.resume(checkpoint.parent.name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+devpilot\runtime\custom\runner.py:210: in resume
+    "completed",
+E   ValueError: Runtime/config/provider changed; resume refused
+=========================== short test summary info ===========================
+FAILED tests/test_p0_p2_boundaries.py::test_evaluation_budget_is_cumulative_across_rejections
+FAILED tests/runtime/test_recovery.py::test_resume_preserves_workspace_steps_budget_guard_and_unknown_usage
+FAILED tests/runtime/test_recovery.py::test_resume_request_limit_is_not_reset
+FAILED tests/runtime/test_recovery.py::test_ready_boundary_restores_test_retry_and_repair_history
+4 failed, 124 passed, 1 skipped in 320.88s (0:05:20)

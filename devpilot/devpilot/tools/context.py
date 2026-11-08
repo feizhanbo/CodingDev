@@ -22,6 +22,7 @@ class ToolContext(BaseModel):
     test_python: str | None = None
     test_timeout_seconds: float | None = None
     deadline: float | None = None
+    max_output_bytes: int = 2097152
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 

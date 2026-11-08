@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from pydantic import BaseModel
 
+from devpilot.execution import execution_scope
+from devpilot.processes import run_cancellable
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
+from devpilot.tools.repo.file_cache import ReadFileCache
+from devpilot.tools.repo.streaming import bounded_lines, content_digest
 
 MAX_LINES = 500
 ARROW = "\u2192"  # →
@@ -42,65 +45,71 @@ constraints:
 """
     input_model = ReadFileInput
 
+    def __init__(self) -> None:
+        self.cache = ReadFileCache()
+
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
-        inp = args  # validated by registry as ReadFileInput
-        guard = PathGuard(ctx.workspace_root)
+        # Authorize EVERY access, including cache hits, before opening any content.
         try:
-            resolved = guard.validate_path(inp.path)
-        except PermissionError as exc:
+            resolved = PathGuard(ctx.workspace_root).validate_path(args.path)
+            if not resolved.is_file():
+                return ToolResult(success=False, error=f"Not a file: {args.path}")
+            return await run_cancellable(self._read, resolved, args, ctx)
+        except (OSError, UnicodeError) as exc:
             return ToolResult(success=False, error=str(exc))
 
-        if not resolved.is_file():
-            return ToolResult(success=False, error=f"Not a file: {inp.path}")
-
-        try:
-            raw = await asyncio.to_thread(
-                resolved.read_text, encoding="utf-8"
+    def _read(self, path, args, ctx, *, cancel):
+        with execution_scope(cancel=cancel, deadline=ctx.deadline):
+            key = (
+                str(path),
+                args.start_line,
+                args.end_line,
+                content_digest(path),
+                ctx.max_output_bytes,
             )
-        except UnicodeDecodeError as exc:
-            return ToolResult(
-                success=False,
-                error=f"File is not valid UTF-8: {inp.path} ({exc})",
+            cached = self.cache.get(key)
+            if cached is not None:
+                return cached
+            start = max(1, args.start_line or 1)
+            end = max(start, args.end_line) if args.end_line is not None else None
+            # Reserve JSON metadata and worst-case JSON escaping space.
+            limit = max(1, (ctx.max_output_bytes - 1024) // 6)
+            numbered = []
+            used = 0
+            truncated = False
+            for number, line, clipped in bounded_lines(path, limit):
+                if number < start:
+                    continue
+                if end is not None and number > end:
+                    break
+                rendered = f"{number:>4}{ARROW}{line}"
+                size = len(rendered.encode("utf-8")) + 1
+                if len(numbered) >= MAX_LINES or used + size > limit:
+                    available = max(0, limit - used - 1)
+                    if available and len(numbered) < MAX_LINES:
+                        numbered.append(
+                            rendered.encode("utf-8")[:available].decode("utf-8", errors="ignore")
+                        )
+                    truncated = True
+                    break
+                numbered.append(rendered)
+                used += size
+                truncated |= clipped
+            content = "\n".join(numbered)
+            if truncated:
+                content += "\n... (truncated)"
+            result = ToolResult(
+                success=True,
+                data={
+                    "path": _relative(path, ctx.workspace_root),
+                    "start_line": start,
+                    "end_line": start + len(numbered) - 1,
+                    "content": content,
+                    "truncated": truncated,
+                },
             )
-        except OSError as exc:
-            return ToolResult(success=False, error=str(exc))
-
-        all_lines = raw.splitlines()
-        start = (inp.start_line or 1)
-        end = inp.end_line or len(all_lines)
-        # clamp to valid range (1-indexed)
-        start = max(1, start)
-        end = min(len(all_lines), end)
-        if end < start:
-            end = start
-
-        selected = all_lines[start - 1:end]
-        truncated = False
-        if len(selected) > MAX_LINES:
-            selected = selected[:MAX_LINES]
-            truncated = True
-
-        numbered = [
-            f"{start + i:>4}{ARROW}{line}" for i, line in enumerate(selected)
-        ]
-        content = "\n".join(numbered)
-        if truncated:
-            content += (
-                f"\n... (truncated, showing {MAX_LINES} of "
-                f"{end - start + 1} lines)"
-            )
-
-        rel = _relative(resolved, ctx.workspace_root)
-        return ToolResult(
-            success=True,
-            data={
-                "path": rel,
-                "start_line": start,
-                "end_line": start + len(selected) - 1,
-                "content": content,
-                "truncated": truncated,
-            },
-        )
+            self.cache.put(key, result)
+            return result
 
 
 def _relative(path: Path, workspace_root: str) -> str:

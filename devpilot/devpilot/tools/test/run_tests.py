@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from devpilot.processes import run_process_async
 from devpilot.security import process_environment
+from devpilot.storage import ArtifactQuotaExceeded
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
@@ -69,7 +70,7 @@ constraints:
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
         inp = args  # validated by registry as RunTestsInput
-        from devpilot.evals.benchmark import parse_junit
+        from devpilot.testing.junit import parse_junit
 
         target = inp.target if inp.target else "."
         try:
@@ -105,9 +106,11 @@ constraints:
                 env=process_environment(),
                 log=log_path,
                 timeout=timeout,
-                output_limit=self.output_limit_bytes,
+                output_limit=min(self.output_limit_bytes, ctx.max_output_bytes),
                 secrets=self.secrets,
             )
+        except ArtifactQuotaExceeded:
+            raise
         except (OSError, RuntimeError) as exc:
             return ToolResult(
                 success=False,
@@ -144,7 +147,9 @@ constraints:
                     "status": "ERROR",
                 },
             )
-        evidence = parse_junit(report_path, process.exit_code)
+        evidence = parse_junit(
+            report_path, process.exit_code, min(self.output_limit_bytes, ctx.max_output_bytes)
+        )
         return ToolResult(
             success=evidence.status == "PASS",
             data={

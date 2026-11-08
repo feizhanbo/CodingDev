@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from pydantic import BaseModel
 
+from devpilot.execution import check_execution
+from devpilot.processes import capture_process_async, run_sync
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
@@ -52,8 +53,10 @@ constraints:
                 data={"path": inp.path, "modified_files": []},
             )
 
+        if len(inp.content.encode("utf-8")) > ctx.max_output_bytes:
+            raise ValueError("file_content_limit_exceeded: complete content required")
         try:
-            await asyncio.to_thread(_write_file, resolved, inp.content)
+            await run_sync(_write_file, resolved, inp.content)
         except OSError as exc:
             return ToolResult(
                 success=False,
@@ -74,6 +77,7 @@ constraints:
 
 def _write_file(path: Path, content: str) -> None:
     """Create parent dirs and write UTF-8 content (no newline translation)."""
+    check_execution()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8", newline="") as handle:
         handle.write(content)
@@ -81,18 +85,9 @@ def _write_file(path: Path, content: str) -> None:
 
 async def _git_add(workspace_root: str, file_path: str) -> None:
     """Stage a file so it appears in git diff HEAD."""
-    proc = await asyncio.create_subprocess_exec(
-        "git",
-        "add",
-        "--",
-        file_path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=workspace_root,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"git add failed: {stderr.decode(errors='replace')}")
+    result = await capture_process_async(["git", "add", "--", file_path], cwd=workspace_root)
+    if result.returncode:
+        raise RuntimeError(f"git add failed: {result.stderr}")
 
 
 def _relative(path: Path, workspace_root: Path) -> str:

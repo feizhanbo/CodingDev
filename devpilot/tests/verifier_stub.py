@@ -1,6 +1,7 @@
 """Only for orchestration unit tests; integration tests use TaskVerifier."""
 from devpilot.verification.verifier import VerificationResult
 
+
 class PassingVerifier:
     deadline = None
 

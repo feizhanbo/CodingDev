@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from devpilot.execution import check_execution
-from devpilot.processes import run_sync
 from devpilot.security import forbidden, linked
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
@@ -62,7 +61,7 @@ constraints:
             return ToolResult(success=False, error=f"Not a directory: {inp.path}")
 
         workspace = Path(ctx.workspace_root)
-        entries = await run_sync(_walk_sync, resolved, workspace, inp.depth)
+        entries = await asyncio.to_thread(_walk_sync, resolved, workspace, inp.depth)
         truncated = False
         if len(entries) > MAX_ENTRIES:
             entries = entries[:MAX_ENTRIES]
@@ -79,16 +78,12 @@ def _walk_sync(root: Path, workspace_root: Path, max_depth: int) -> list[dict[st
     entries: list[dict[str, str]] = []
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
-        check_execution()
         current, depth = stack.pop()
         try:
             children = sorted(current.iterdir(), key=lambda p: p.name)
         except (PermissionError, OSError):
             continue
         for child in children:
-            check_execution()
-            if len(entries) > MAX_ENTRIES:
-                return entries
             name = child.name
             if linked(child) or forbidden(child.relative_to(workspace_root).as_posix()):
                 continue

@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
 
 from pydantic import BaseModel
 
-from devpilot.processes import capture_process_async, run_sync
 from devpilot.security import permitted_files
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 from devpilot.tools.path_guard import PathGuard
-from devpilot.tools.repo.streaming import bounded_lines
 
 SKIP_DIRS = {
     ".git",
@@ -64,38 +63,25 @@ constraints:
                 raise ValueError("max_results must be positive")
             rg = shutil.which("rg")
             matches = []
-            truncated = False
             # Bound command length on Windows; filter BEFORE reading file contents.
             for path in files:
                 if rg:
-                    try:
-                        proc = await capture_process_async(
-                            [
-                                rg,
-                                "--json",
-                                "--fixed-strings",
-                                "--max-columns",
-                                "4096",
-                                "--max-count",
-                                str(args.max_results + 1),
-                                "--",
-                                args.query,
-                                str(path),
-                            ],
-                            cwd=ctx.workspace_root,
-                            output_limit=ctx.max_output_bytes,
-                        )
-                    except ValueError as exc:
-                        if "output_limit" not in str(exc):
-                            raise
-                        return ToolResult(
-                            success=True, data={"matches": matches, "truncated": True}
-                        )
+                    proc = await asyncio.create_subprocess_exec(
+                        rg,
+                        "--json",
+                        "--fixed-strings",
+                        "--",
+                        args.query,
+                        str(path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=ctx.workspace_root,
+                    )
+                    stdout, stderr = await proc.communicate()
                     if proc.returncode not in (0, 1):
-                        raise RuntimeError(proc.stderr)
-                    stdout = proc.stdout
+                        raise RuntimeError(stderr.decode(errors="replace"))
                     lines = []
-                    for line in stdout.splitlines():
+                    for line in stdout.decode(errors="replace").splitlines():
                         item = json.loads(line)
                         if item["type"] == "match":
                             data = item["data"]
@@ -103,23 +89,15 @@ constraints:
                                 (data["line_number"], data["lines"]["text"].rstrip("\r\n"))
                             )
                 else:
-
-                    def search(path=path):
-                        found = []
-                        clipped_any = False
-                        for number, line, clipped in bounded_lines(path, 4096):
-                            clipped_any |= clipped
-                            if args.query in line:
-                                found.append((number, line))
-                            if len(found) > args.max_results:
-                                break
-                        return found, clipped_any
-
                     try:
-                        lines, clipped = await run_sync(search)
-                        truncated |= clipped
-                    except (UnicodeError, OSError):
+                        content = await asyncio.to_thread(path.read_text, encoding="utf-8")
+                    except (UnicodeDecodeError, OSError):
                         continue
+                    lines = [
+                        (i, line)
+                        for i, line in enumerate(content.splitlines(), 1)
+                        if args.query in line
+                    ]
                 for number, line in lines:
                     matches.append(
                         {
@@ -128,18 +106,11 @@ constraints:
                             "text": line,
                         }
                     )
-                    if len(json.dumps(matches).encode("utf-8")) > max(
-                        0, ctx.max_output_bytes - 1024
-                    ):
-                        matches.pop()
-                        return ToolResult(
-                            success=True, data={"matches": matches, "truncated": True}
-                        )
                     if len(matches) > args.max_results:
                         return ToolResult(
                             success=True,
                             data={"matches": matches[: args.max_results], "truncated": True},
                         )
-            return ToolResult(success=True, data={"matches": matches, "truncated": truncated})
+            return ToolResult(success=True, data={"matches": matches, "truncated": False})
         except (PermissionError, ValueError, RuntimeError, OSError) as exc:
             return ToolResult(success=False, error=str(exc))

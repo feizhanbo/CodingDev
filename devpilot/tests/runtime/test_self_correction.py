@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from tests.verifier_stub import PassingVerifier
 
 from devpilot.agents.developer import DeveloperAgent
 from devpilot.domain.decision import AgentDecision, FinishIntent, ToolAction
@@ -23,7 +24,6 @@ from devpilot.tools.test import RunTests
 from devpilot.tracing import MetricsCollector, TraceWriter
 from devpilot.verification import TaskVerifier
 from devpilot.workspace.sandbox import SandboxWorkspace
-from tests.verifier_stub import PassingVerifier
 
 
 def _write(path: Path, content: str) -> None:

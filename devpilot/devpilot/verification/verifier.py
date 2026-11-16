@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from devpilot.domain.decision import ToolAction
 from devpilot.domain.state import DevPilotState
 from devpilot.domain.task import DevelopmentTask
-from devpilot.processes import run_cancellable, run_sync
+from devpilot.processes import run_cancellable
 from devpilot.runtime.base import RuntimeConfig
 from devpilot.tools.context import ToolContext
 from devpilot.tools.registry import ToolRegistry
@@ -61,7 +61,7 @@ class TaskVerifier:
         registry: ToolRegistry,
     ) -> VerificationResult:
         """Run all verification checks and return the aggregated result."""
-        from devpilot.testing.suite import run_independent_suite
+        from devpilot.evals.benchmark import run_independent_suite
 
         checks: list[dict[str, Any]] = []
         trusted = self._snapshots.get(state.run_id)
@@ -78,8 +78,7 @@ class TaskVerifier:
                 failure_reason="Missing trusted baseline",
             )
         try:
-            candidate, diff, changed = await run_sync(
-                materialize_candidate,
+            candidate, diff, changed = materialize_candidate(
                 Path(workspace_path),
                 trusted,
                 trusted.parent,
@@ -201,11 +200,8 @@ class TaskVerifier:
         }
         failed = [c["message"] for c in checks if not c["passed"]]
         return VerificationResult(
-            success=not failed,
-            checks=checks,
-            failure_reason="; ".join(failed) if failed else None,
-            coverage=coverage_for(task, checks),
-            evidence_ref=str(candidate.parent),
+            success=not failed, checks=checks, failure_reason="; ".join(failed) if failed else None,
+            coverage=coverage_for(task, checks), evidence_ref=str(candidate.parent),
         )
 
     async def _check_visible_tests(
@@ -308,26 +304,14 @@ def coverage_for(task: DevelopmentTask, checks: list[dict]) -> list[dict]:
         )
         available = [by_name[name] for name in mapped if name in by_name]
         status = (
-            "uncovered"
-            if not available
-            else "verified"
-            if all(c["passed"] for c in available)
-            else "failed"
+            "uncovered" if not available
+            else "verified" if all(c["passed"] for c in available) else "failed"
         )
-        coverage.append(
-            {
-                "index": index,
-                "criterion": criterion,
-                "checks": mapped,
-                "status": status,
-                "evidence_refs": [
-                    c.get("result", {}).get("report_file")
-                    for c in available
-                    if c.get("result", {}).get("report_file")
-                ],
-                "reason": "No deterministic check bound to this condition"
-                if not available
-                else None,
-            }
-        )
+        coverage.append({
+            "index": index, "criterion": criterion, "checks": mapped,
+            "status": status,
+            "evidence_refs": [c.get("result", {}).get("report_file") for c in available
+                              if c.get("result", {}).get("report_file")],
+            "reason": "No deterministic check bound to this condition" if not available else None,
+        })
     return coverage

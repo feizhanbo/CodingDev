@@ -10,11 +10,7 @@ from devpilot.runtime.custom.context import ContextBuilder
 from devpilot.tools.registry import ToolRegistry
 from devpilot.verification.verifier import VerificationResult, coverage_for
 from tests.runtime.test_runner import (
-    _make_runner,
-    _make_task,
-    _resp_action,
-    _resp_finish,
-    _setup_baseline,
+    _make_runner, _make_task, _resp_action, _resp_finish, _setup_baseline,
 )
 
 
@@ -39,16 +35,9 @@ class ScriptedVerifier:
 async def test_early_rejection_retains_repair_after_passing_tool_test(tmp_path):
     base = tmp_path / "base"
     _setup_baseline(base)
-    runner = _make_runner(
-        [
-            _resp_finish(),
-            _resp_action("test.run"),
-            _resp_finish(),
-        ],
-        RuntimeConfig(),
-        base,
-        tmp_path,
-    )
+    runner = _make_runner([
+        _resp_finish(), _resp_action("test.run"), _resp_finish(),
+    ], RuntimeConfig(), base, tmp_path)
     runner.verifier = ScriptedVerifier()
     seen = []
     decide = runner.agent.decide
@@ -63,9 +52,7 @@ async def test_early_rejection_retains_repair_after_passing_tool_test(tmp_path):
     assert result.status == "completed", result.error
     assert "Current Phase: implementing" in seen[1]
     assert "missing edge" in seen[1] and "missing edge" in seen[2]
-    state = json.loads(
-        (tmp_path / "runs" / result.run_id / "state.json").read_text(encoding="utf-8")
-    )
+    state = json.loads((tmp_path / "runs" / result.run_id / "state.json").read_text(encoding="utf-8"))
     assert not state["repair_required"]
     assert not state["repair_sources"]
     assert state["retry_count"] == 1
@@ -74,13 +61,10 @@ async def test_early_rejection_retains_repair_after_passing_tool_test(tmp_path):
 def test_coverage_does_not_infer_behavior_from_test_success():
     task = _make_task()
     task.acceptance_criteria = ["Returns 201", "Add tests"]
-    result = coverage_for(
-        task,
-        [
-            {"name": "visible_tests", "passed": True},
-            {"name": "required_new_tests", "passed": True},
-        ],
-    )
+    result = coverage_for(task, [
+        {"name": "visible_tests", "passed": True},
+        {"name": "required_new_tests", "passed": True},
+    ])
     assert [c["status"] for c in result] == ["uncovered", "verified"]
 
 
@@ -105,17 +89,10 @@ def test_context_hard_limit_preserves_task_and_plan():
     with pytest.raises(ContextBudgetExceeded):
         builder.build(state, ".")
     state.task.description = "important task"
-    state.observations = [
-        Observation(
-            step_id=i,
-            source="tool",
-            name="repo.read_file",
-            success=True,
-            summary="read",
-            data={"content": "x" * 20000, "path": f"{i}.py"},
-        )
-        for i in range(50)
-    ]
+    state.observations = [Observation(
+        step_id=i, source="tool", name="repo.read_file", success=True,
+        summary="read", data={"content": "x" * 20000, "path": f"{i}.py"},
+    ) for i in range(50)]
     messages = builder.build(state, ".")
     assert sum(len(m.content) for m in messages) <= 30000
     assert any("important task" in m.content for m in messages)
@@ -159,8 +136,7 @@ def test_oversized_latest_plan_is_not_silently_removed():
     from devpilot.runtime.custom.state_manager import StateManager
 
     state = StateManager(RuntimeConfig()).create(_make_task())
-    state.plan = ImplementationPlan(
-        goal="keep", steps=[PlanStep(id=1, description="p" * 40000, status="pending")]
-    )
+    state.plan = ImplementationPlan(goal="keep", steps=[PlanStep(id=1, description="p" * 40000, status="pending")])
     with pytest.raises(ContextBudgetExceeded):
         ContextBuilder(RuntimeConfig(), ToolRegistry()).build(state, ".")
+

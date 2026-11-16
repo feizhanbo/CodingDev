@@ -7,7 +7,7 @@
 DevPilot 是一个面向企业软件研发流程的**任务执行型 AI Agent**。它接收一个研发 Issue，主动分析目标代码仓库，形成实施计划，调用受控工具完成代码修改和测试，基于测试结果进行自我修复，最终输出可审查的 Git Diff 与交付报告。
 
 > **项目定位**：学习型企业研发 Agent / Agent Engineering 实验平台  
-> **技术路线**：LangGraph / LangChain 渐进迁移，保留 Custom Runtime 兼容入口<br>
+> **技术路线**：Custom Runtime First，Framework Ready  
 > **V1 运行模式**：单 Agent + 本地 Sandbox + Mock 后端仓库（ShopFlow）+ Deterministic Verifier
 
 ---
@@ -23,7 +23,7 @@ V1 的目标不是尽快调用一个现成 Agent 框架，而是**亲自暴露 A
 ## 核心特性
 
 - ✅ **完整研发闭环**：Issue → Explore → Plan → Edit → Test → Repair → Verify → Report
-- ✅ **双运行时**：可显式选择 Custom 或 LangGraph 编排，共用业务执行与守卫；模型可选择 OpenAI 或 LangChain 适配器
+- ✅ **自研 Custom Runtime**：Agent Loop / State Manager / Context Builder / Loop Guard 全部自实现，未来可平滑迁移框架
 - ✅ **受控 Tool System**：8 个核心工具（repo / code / test / git），无任意 shell，路径越界/forbidden 文件全程拦截
 - ✅ **隔离 Sandbox**：每次运行从 baseline 仓库创建干净 workspace，不污染宿主环境
 - ✅ **Deterministic Verifier**：完成状态由测试 + 策略检查驱动，不信任 LLM 自我声明
@@ -71,12 +71,6 @@ Git Diff + Delivery Report
 ---
 
 ## 快速开始
-
-当前默认使用 `langgraph` / `langchain`，保留 `custom` / `openai` 显式回退。
-使用方式、恢复兼容和回退规则见
-[迁移使用说明](docs/refactor-langgraph-langchain-langfuse-2026-10-29/runtime-usage.md)，
-完整任务与证据见
-[重构开发计划](docs/refactor-langgraph-langchain-langfuse-2026-10-29/development-plan-2026-11-03.md)。
 
 ### 前置依赖
 

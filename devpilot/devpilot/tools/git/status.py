@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from pydantic import BaseModel
 
-from devpilot.processes import capture_process_async
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 
@@ -32,7 +33,9 @@ constraints:
     input_model = GitStatusInput
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolResult:
-        stdout, stderr, code = await _run(["git", "status", "--porcelain"], ctx.workspace_root)
+        stdout, stderr, code = await _run(
+            ["git", "status", "--porcelain"], ctx.workspace_root
+        )
         if code != 0:
             return ToolResult(
                 success=False,
@@ -47,5 +50,15 @@ constraints:
 
 
 async def _run(cmd: list[str], cwd: str) -> tuple[str, str, int]:
-    result = await capture_process_async(cmd, cwd=cwd)
-    return result.stdout, result.stderr, result.returncode
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    stdout, stderr = await proc.communicate()
+    return (
+        stdout.decode(errors="replace"),
+        stderr.decode(errors="replace"),
+        proc.returncode if proc.returncode is not None else 0,
+    )

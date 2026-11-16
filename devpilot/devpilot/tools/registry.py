@@ -8,8 +8,6 @@ from typing import Any
 from pydantic import ValidationError
 
 from devpilot.domain.decision import ToolAction
-from devpilot.execution import execution_scope
-from devpilot.storage import ArtifactQuotaExceeded
 from devpilot.tools.base import Tool
 from devpilot.tools.context import ToolContext, ToolResult
 
@@ -62,14 +60,7 @@ class ToolRegistry:
 
         start = time.monotonic()
         try:
-            with execution_scope(deadline=ctx.deadline, output_limit=ctx.max_output_bytes):
-                result = await tool.execute(args, ctx)
-            if len(result.model_dump_json().encode("utf-8")) > ctx.max_output_bytes:
-                result = ToolResult(
-                    success=False, error="tool_output_limit_exceeded: complete result unavailable"
-                )
-        except ArtifactQuotaExceeded:
-            raise
+            result = await tool.execute(args, ctx)
         except PermissionError as exc:
             return ToolResult(success=False, error=str(exc))
         except Exception as exc:  # noqa: BLE001 - registry must not raise

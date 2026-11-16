@@ -45,9 +45,7 @@ async def test_failed_attempts_consume_request_budget(tmp_path):
     assert len(calls) == 2
     assert result.status == "failed"
     assert result.termination_reason == "max_llm_requests"
-    saved = json.loads(
-        (tmp_path / "runs" / result.run_id / "result.json").read_text(encoding="utf-8")
-    )
+    saved = json.loads((tmp_path / "runs" / result.run_id / "result.json").read_text(encoding="utf-8"))
     assert saved["budget"]["llm_requests"] == 2
     assert result.total_steps == 0
 
@@ -61,8 +59,7 @@ async def test_model_timeout_is_bounded(tmp_path):
         await asyncio.sleep(10)
 
     runner.agent.decide = slow
-    # Preparation is now budgeted too; this test isolates the three model timeouts.
-    result = await asyncio.wait_for(runner.run(_make_task()), 30)
+    result = await asyncio.wait_for(runner.run(_make_task()), 5)
     assert result.status == "failed"
     assert result.budget["llm_requests"] == 3
 

@@ -8,13 +8,6 @@ DevPilot is an AI agent system that receives a development issue, explores the t
 
 V1 Mode: Single Agent + Local Sandbox + Mock Backend (ShopFlow) + Deterministic Verifier
 
-Custom and LangGraph orchestration share the execution services. OpenAI and
-LangChain model adapters are selectable independently. Defaults are
-`langgraph` / `langchain`; explicit `custom` / `openai` remains available. See the
-[migration usage guide](../docs/refactor-langgraph-langchain-langfuse-2026-10-29/runtime-usage.md)
-for explicit backend selection, resume compatibility and rollback. Langfuse is
-deferred to a separate phase.
-
 ## Quick Start
 
 ### Prerequisites

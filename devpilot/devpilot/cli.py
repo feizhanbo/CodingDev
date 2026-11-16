@@ -5,33 +5,43 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from enum import StrEnum
+from importlib.resources import files
 from pathlib import Path
-from typing import Annotated
 
 import typer
+import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from devpilot.application.factory import create_runtime
+from devpilot.agents.developer import DeveloperAgent
+from devpilot.domain.decision import AgentDecision, FinishIntent, ToolAction
 from devpilot.domain.result import AgentRunResult
 from devpilot.domain.task import DevelopmentTask
-from devpilot.runtime.contracts import RunRequest
+from devpilot.llm.base import LLMResponse
+from devpilot.llm.fake import FakeLLMClient
+from devpilot.llm.openai import OpenAIClient
+from devpilot.runtime.base import RuntimeConfig
+from devpilot.runtime.custom.context import ContextBuilder
+from devpilot.runtime.custom.loop_guard import LoopGuard
+from devpilot.runtime.custom.runner import CustomAgentRunner
+from devpilot.runtime.custom.state_manager import StateManager
 from devpilot.settings import Settings
+from devpilot.tools.code.apply_patch import ApplyPatch
+from devpilot.tools.code.create_file import CreateFile
+from devpilot.tools.git.diff import GitDiff
+from devpilot.tools.git.status import GitStatus
+from devpilot.tools.registry import ToolRegistry
+from devpilot.tools.repo.list_files import ListFiles
+from devpilot.tools.repo.read_file import ReadFile
+from devpilot.tools.repo.search_code import SearchCode
+from devpilot.tools.test.run_tests import RunTests
+from devpilot.tracing import MetricsCollector, TraceWriter
+from devpilot.verification import TaskVerifier
+from devpilot.workspace.sandbox import SandboxWorkspace
 
 app = typer.Typer(name="devpilot", help="DevPilot - AI Development Task Agent")
 console = Console()
-
-
-class LLMBackend(StrEnum):
-    openai = "openai"
-    langchain = "langchain"
-
-
-class RuntimeBackend(StrEnum):
-    custom = "custom"
-    langgraph = "langgraph"
 
 
 @app.callback()
@@ -39,14 +49,159 @@ def _callback() -> None:
     """DevPilot - AI Development Task Agent."""
 
 
-# Public compatibility exports; assembly lives in the application layer.
-from devpilot.application.bootstrap import (  # noqa: E402, F401
-    create_fake_client,
-    initialize_components,
-    load_issue,
-    register_all_tools,
-    smoke_repository,
-)
+def load_issue(path: str) -> DevelopmentTask:
+    """Load a development issue from a YAML file.
+
+    Maps YAML fields to :class:`DevelopmentTask` and records the source
+    file path in ``metadata``.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"Issue file not found: {path}")
+    with p.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid issue YAML (expected mapping): {path}")
+    required = {"id", "title", "description", "acceptance_criteria"}
+    missing = required - set(data)
+    if missing:
+        raise ValueError(f"Issue YAML missing required fields: {sorted(missing)}")
+    metadata = dict(data.get("metadata") or {})
+    metadata["issue_file"] = str(p.resolve())
+    return DevelopmentTask(
+        id=data["id"],
+        title=data["title"],
+        description=data["description"],
+        acceptance_criteria=list(data.get("acceptance_criteria", [])),
+        constraints=list(data.get("constraints", [])),
+        metadata=metadata,
+    )
+
+
+def register_all_tools(registry: ToolRegistry, settings: Settings | None = None) -> None:
+    """Register all eight DevPilot tools onto *registry*."""
+    registry.register(ListFiles())
+    registry.register(SearchCode())
+    registry.register(ReadFile())
+    registry.register(ApplyPatch())
+    registry.register(CreateFile())
+    settings = settings or Settings()
+    registry.register(
+        RunTests(
+            settings.test_python,
+            settings.test_timeout_seconds,
+            settings.runs_root,
+            output_limit_bytes=settings.max_test_output_bytes,
+        )
+    )
+    registry.register(GitDiff())
+    registry.register(GitStatus())
+
+
+def smoke_repository() -> str:
+    return str(files("devpilot") / "fixtures" / "smoke")
+
+
+def create_fake_client() -> FakeLLMClient:
+    """Exercise a genuine code edit, failure, repair, added test and verification."""
+
+    def patch(before: str, after: str) -> dict:
+        return {
+            "patch": "--- a/calculator.py\n+++ b/calculator.py\n@@ -4 +4 @@\n"
+            f"-    return {before}\n+    return {after}\n"
+        }
+
+    actions = [
+        ToolAction(tool="repo.search_code", arguments={"query": "add"}),
+        ToolAction(tool="repo.read_file", arguments={"path": "calculator.py"}),
+        ToolAction(tool="code.apply_patch", arguments=patch("0", "a - b")),
+        ToolAction(tool="test.run", arguments={}),
+        ToolAction(tool="code.apply_patch", arguments=patch("a - b", "a + b")),
+        ToolAction(
+            tool="code.create_file",
+            arguments={
+                "path": "tests/test_addition_edges.py",
+                "content": (
+                    "from calculator import add\n\ndef test_zero():\n    assert add(0, 9) == 9\n"
+                ),
+            },
+        ),
+        ToolAction(tool="test.run", arguments={}),
+    ]
+    responses = [LLMResponse(model="fake", decision=AgentDecision(action=a)) for a in actions]
+    responses.append(
+        LLMResponse(
+            model="fake",
+            decision=AgentDecision(
+                finish=FinishIntent(summary="Runtime smoke: addition repaired", risk="low")
+            ),
+        )
+    )
+    return FakeLLMClient(responses)
+
+
+def initialize_components(
+    config: RuntimeConfig | None = None,
+    fake: bool = False,
+    base_repo: str | None = None,
+    on_event: Callable[[str, dict], None] | None = None,
+    settings: Settings | None = None,
+) -> CustomAgentRunner:
+    """Initialize all DevPilot components and return a ready runner."""
+    settings = settings or Settings()
+    config = config or settings.runtime_config()
+    settings = settings.model_copy(
+        update={name: getattr(config, name) for name in config.__dataclass_fields__}
+    )
+    # 1. LLM Client
+    llm_client = create_fake_client() if fake else OpenAIClient(config=settings.llm_config())
+
+    # 2. Tool Registry
+    registry = ToolRegistry()
+    register_all_tools(registry, settings)
+
+    # 3. Sandbox
+    ws_config = settings.workspace_config()
+    sandbox = SandboxWorkspace(
+        base_repo_path=(base_repo or (smoke_repository() if fake else ws_config.base_repo)),
+        workspace_root=ws_config.workspace_root,
+        runs_root=ws_config.runs_root,
+    )
+
+    sandbox.secrets = (settings.api_key,)
+    sandbox.max_bytes = settings.workspace_max_bytes
+    sandbox.total_max_bytes = settings.workspace_total_max_bytes
+    sandbox.artifacts_max_bytes = settings.run_artifacts_max_bytes
+    sandbox.artifacts_total_max_bytes = settings.runs_total_max_bytes
+    test_tool = registry.get("test.run")
+    test_tool.secrets = sandbox.secrets
+
+    # 4. Runtime components
+    state_manager = StateManager(config)
+    context_builder = ContextBuilder(config, registry)
+    loop_guard = LoopGuard(config)
+    agent = DeveloperAgent(llm_client, registry)
+
+    # 5. Verifier and tracing
+    verifier = TaskVerifier(config)
+    trace_writer = TraceWriter(ws_config.runs_root)
+    trace_writer.secrets = sandbox.secrets
+    context_builder.trace_writer = trace_writer
+    metrics = MetricsCollector()
+
+    return CustomAgentRunner(
+        agent=agent,
+        registry=registry,
+        sandbox=sandbox,
+        state_manager=state_manager,
+        context_builder=context_builder,
+        loop_guard=loop_guard,
+        config=config,
+        on_event=on_event,
+        verifier=verifier,
+        trace_writer=trace_writer,
+        metrics=metrics,
+    )
 
 
 def _format_tool_result(tool: str, success: bool, data: dict | None) -> str:
@@ -137,9 +292,7 @@ def _display_summary(result: AgentRunResult, task: DevelopmentTask) -> None:
     if coverage:
         verified = sum(c["status"] == "verified" for c in coverage)
         uncovered = sum(c["status"] == "uncovered" for c in coverage)
-        table.add_row(
-            "Acceptance coverage", f"{verified}/{len(coverage)} verified; {uncovered} uncovered"
-        )
+        table.add_row("Acceptance coverage", f"{verified}/{len(coverage)} verified; {uncovered} uncovered")
     table.add_row(
         "Modified Files",
         ", ".join(result.modified_files) if result.modified_files else "(none)",
@@ -164,8 +317,6 @@ def run(
     base_repo: str = typer.Option(None, "--base-repo", help="Override base repo path"),
     test_python: str | None = typer.Option(None, help="Target pytest Python interpreter"),
     env_file: str = typer.Option(".env", help="Configuration dotenv file"),
-    llm_backend: Annotated[LLMBackend | None, typer.Option(help="Model adapter backend")] = None,
-    runtime: Annotated[RuntimeBackend | None, typer.Option(help="Execution runtime")] = None,
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ) -> None:
     """Run DevPilot on a development issue."""
@@ -175,15 +326,11 @@ def run(
 
     # 2. Initialize components
     overrides = {"test_python": test_python} if test_python else {}
-    if runtime is not None:
-        overrides["runtime"] = runtime.value
-    if llm_backend is not None:
-        overrides["llm_backend"] = llm_backend.value
     settings = Settings(_env_file=env_file, **overrides)
     config = settings.runtime_config()
     callback = _make_rich_callback(task.id, verbose=verbose)
-    runtime = create_runtime(
-        config=config,
+    runner = initialize_components(
+        config,
         fake=fake,
         base_repo=None if fake else base_repo,
         on_event=callback,
@@ -194,7 +341,7 @@ def run(
         console.print("Runtime smoke uses the bundled fixture; it is not a capability evaluation.")
 
     # 3. Run agent
-    result = asyncio.run(runtime.execute(RunRequest(task=task))).result
+    result = asyncio.run(runner.run(task))
 
     # 4. Display results
     _display_summary(result, task)
@@ -214,9 +361,9 @@ def resume(
     """Resume a compatible checkpoint using its original budget and frozen evidence."""
     overrides = {"test_python": test_python} if test_python else {}
     settings = Settings(_env_file=env_file, **overrides)
-    runtime = create_runtime(settings=settings, on_event=_make_rich_callback(run_id, verbose))
+    runner = initialize_components(settings=settings, on_event=_make_rich_callback(run_id, verbose))
     try:
-        result = asyncio.run(runtime.resume(run_id)).result
+        result = asyncio.run(runner.resume(run_id))
     except (OSError, ValueError, RuntimeError) as exc:
         from devpilot.security import redact
 
@@ -240,17 +387,6 @@ def inspect(
     if not run_path.is_dir():
         console.print(f"[red]Run directory not found: {run_path}[/]")
         raise typer.Exit(code=1)
-
-    from devpilot.runtime.manifest import read_manifest
-
-    try:
-        manifest = (read_manifest(run_path.parent, run_id)
-                    if (run_path / "run-manifest.json").exists() else None)
-    except ValueError as exc:
-        console.print(str(exc), markup=False)
-        raise typer.Exit(code=1) from None
-    if manifest is not None:
-        console.print_json(data=manifest.model_dump())
 
     # 1. Load and display state.json
     state_file = run_path / "state.json"
@@ -376,9 +512,9 @@ def diff(
     if not diff_content:
         workspace_path = Path(settings.workspace_root) / run_id / "repo"
         if workspace_path.is_dir():
-            from devpilot.processes import capture_process
+            import subprocess
 
-            result = capture_process(
+            result = subprocess.run(
                 ["git", "diff", "HEAD", "--no-color"],
                 cwd=str(workspace_path),
                 capture_output=True,
@@ -411,18 +547,12 @@ def eval(
     test_python: str | None = typer.Option(None, help="Target pytest Python interpreter"),
     env_file: str = typer.Option(".env", help="Configuration dotenv file"),
     issues_dir: str | None = typer.Option(None, help="Override packaged issue directory"),
-    llm_backend: Annotated[LLMBackend | None, typer.Option(help="Model adapter backend")] = None,
-    runtime: Annotated[RuntimeBackend | None, typer.Option(help="Execution runtime")] = None,
     hidden_tests_dir: str | None = typer.Option(None, help="Override hidden test directory"),
 ) -> None:
     """Run evaluation on issues."""
     from devpilot.evals.runner import EvalRunner
 
     overrides = {"test_python": test_python} if test_python else {}
-    if runtime is not None:
-        overrides["runtime"] = runtime.value
-    if llm_backend is not None:
-        overrides["llm_backend"] = llm_backend.value
     settings = Settings(_env_file=env_file, **overrides)
     ws_config = settings.workspace_config()
     from devpilot.evals.benchmark import packaged_baseline

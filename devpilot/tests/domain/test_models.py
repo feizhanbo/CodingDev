@@ -8,8 +8,7 @@ from pydantic import ValidationError
 from devpilot.domain.decision import AgentDecision, FinishIntent, ToolAction
 from devpilot.domain.plan import ImplementationPlan, PlanStep
 from devpilot.domain.result import AgentRunResult
-from devpilot.domain.state import DevPilotState, Observation
-from devpilot.domain.state import TestRun as DomainTestRun
+from devpilot.domain.state import DevPilotState, Observation, TestRun
 from devpilot.domain.task import DevelopmentTask
 
 
@@ -135,7 +134,7 @@ class TestObservation:
 
 class TestTestRun:
     def test_creation(self) -> None:
-        run = DomainTestRun(
+        run = TestRun(
             run_id="R-1",
             exit_code=0,
             passed=10,
@@ -149,7 +148,7 @@ class TestTestRun:
         assert run.log_file is None
 
     def test_serialization_roundtrip(self) -> None:
-        run = DomainTestRun(
+        run = TestRun(
             run_id="R-1",
             exit_code=1,
             passed=8,
@@ -158,7 +157,7 @@ class TestTestRun:
             summary="2 failures",
             log_file="/tmp/log.txt",
         )
-        restored = DomainTestRun.model_validate(run.model_dump())
+        restored = TestRun.model_validate(run.model_dump())
         assert restored == run
 
 
@@ -201,7 +200,7 @@ class TestDevPilotState:
         obs = Observation(
             step_id=1, source="tool", name="read_file", success=True, summary="ok"
         )
-        run = DomainTestRun(
+        run = TestRun(
             run_id="tr-1", exit_code=0, duration_ms=100, summary="pass"
         )
         state = DevPilotState(

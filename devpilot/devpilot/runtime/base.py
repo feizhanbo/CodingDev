@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from devpilot.domain.result import AgentRunResult
 from devpilot.domain.task import DevelopmentTask
@@ -12,6 +12,10 @@ from devpilot.domain.task import DevelopmentTask
 
 class AgentRunner(Protocol):
     """Small evaluation boundary; evaluators do not import a concrete runtime."""
+
+    sandbox: Any
+    verifier: Any
+    deadline: float | None
 
     async def run(self, task: DevelopmentTask) -> AgentRunResult: ...
 
@@ -39,6 +43,7 @@ class RuntimeConfig:
     evaluation_timeout_seconds: int = 120
     diagnostic_reserve_bytes: int = 8388608
 
+
     def __post_init__(self) -> None:
         for name in (
             "max_context_chars",
@@ -60,13 +65,3 @@ class RuntimeConfig:
                 raise ValueError(f"{name} must be positive")
         if self.max_test_retries < 0:
             raise ValueError("max_test_retries must be non-negative")
-
-
-# Stable public boundary alongside the legacy run(task) protocol.
-from devpilot.runtime.contracts import (  # noqa: E402, F401
-    FrozenPolicy,
-    RunOutcome,
-    RunRequest,
-    RuntimePort,
-    WorkspaceStart,
-)

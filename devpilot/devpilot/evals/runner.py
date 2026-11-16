@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import subprocess
 import tempfile
@@ -14,16 +15,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from devpilot.application.factory import create_runtime
-from devpilot.application.runtime import artifact_store
 from devpilot.domain.result import AgentRunResult
 from devpilot.domain.state import DevPilotState
 from devpilot.domain.task import DevelopmentTask
 from devpilot.evals.metrics import collect_metrics
-from devpilot.execution import current_policy, execution_scope
-from devpilot.processes import capture_process, run_sync
-from devpilot.runtime.base import RuntimeConfig
-from devpilot.runtime.contracts import FrozenPolicy, RunRequest, RuntimePort, WorkspaceStart
+from devpilot.runtime.base import AgentRunner, RuntimeConfig
 from devpilot.security import redact
 from devpilot.settings import Settings
 from devpilot.storage import atomic_write, tree_bytes
@@ -60,7 +56,6 @@ class EvalResult(BaseModel):
     llm_requests: int = 0
     artifact_errors: list[str] = Field(default_factory=list)
     recovery_file: str | None = None
-    budget: dict = Field(default_factory=dict)
 
 
 class EvalRunner:
@@ -73,7 +68,7 @@ class EvalRunner:
         hidden_tests_dir: str | None = None,
         config: RuntimeConfig | None = None,
         settings: Settings | None = None,
-        runner_factory: Callable[..., RuntimePort] | None = None,
+        runner_factory: Callable[..., AgentRunner] | None = None,
     ) -> None:
         from devpilot.evals.benchmark import packaged_baseline
 
@@ -105,70 +100,39 @@ class EvalRunner:
         on_event: Callable[[str, dict], None] | None = None,
     ) -> EvalResult:
         """Run evaluation for a single issue."""
-        from devpilot.evals.benchmark import resource_root
+        from devpilot.evals.benchmark import BenchmarkWorkspace, resource_root
 
         mode = "smoke" if fake else "capability"
         fallback_id = f"eval_error_{uuid.uuid4().hex[:12]}"
         try:
-            from devpilot.application.bootstrap import load_issue
+            from devpilot.cli import load_issue
 
             task = load_issue(str(self.issues_dir / f"{issue_id}.yaml"))
             runner = self._init_components(fake=fake, on_event=on_event)
             builtin = self.issues_dir.resolve() == (resource_root() / "issues").resolve()
-            start = (
-                None
-                if fake
-                else WorkspaceStart(
-                    str(self.base_repo),
-                    "benchmark" if builtin else "copy",
-                    issue_id if builtin else None,
+            if builtin and not fake:
+                runner.sandbox = BenchmarkWorkspace(
+                    issue_id=issue_id,
+                    base_repo_path=str(self.base_repo),
+                    workspace_root=str(runner.sandbox.workspace_root),
+                    runs_root=str(runner.sandbox.runs_root),
                 )
-            )
-            outcome = await runner.execute(
-                RunRequest(task, "evaluation", start, FrozenPolicy.from_config(self.config))
-            )
-            run_result = outcome.result
-            sandbox = artifact_store(outcome, self.settings, self.config)
-            evidence = outcome.evidence
+            runner.sandbox.secrets = (self.settings.api_key,)
+            runner.sandbox.max_bytes = self.settings.workspace_max_bytes
+            runner.sandbox.total_max_bytes = self.settings.workspace_total_max_bytes
+            runner.sandbox.artifacts_max_bytes = self.settings.run_artifacts_max_bytes
+            runner.sandbox.artifacts_total_max_bytes = self.settings.runs_total_max_bytes
+            runner.purpose = "evaluation"
+            run_result = await runner.run(task)
+            evidence = runner.verifier.last_results.get(run_result.run_id, {})
             visible = evidence.get("visible", {})
-            evaluation_budget = dict(outcome.budget)
-            hidden_started = time.monotonic()
-            if fake:
-                hidden = {
-                    "status": "NOT_EVALUATED",
-                    "details": "Smoke does not run hidden acceptance tests",
-                }
-            else:
-                global_remaining = min(
-                    outcome.budget.get("remaining_seconds", 0),
-                    outcome.budget.get("deadline_at", 0) - time.time(),
+            self.deadline = runner.deadline
+            hidden = (
+                {"status": "NOT_EVALUATED", "details": "Smoke does not run hidden acceptance tests"}
+                if fake
+                else await asyncio.to_thread(
+                    self._run_hidden_tests, issue_id, run_result.run_id, runner.sandbox
                 )
-                evaluation_remaining = outcome.budget.get("evaluation_remaining_seconds", 0)
-                available = min(global_remaining, evaluation_remaining)
-                if available <= 0:
-                    hidden = {"status": "ERROR", "details": "Task/evaluation budget exhausted"}
-                else:
-                    with (
-                        execution_scope(
-                            deadline=time.monotonic() + available,
-                            timeout_reason="evaluation_timeout_seconds",
-                        ),
-                        sandbox.admit_artifacts(
-                            run_result.run_id, self.config.max_test_output_bytes
-                        ),
-                    ):
-                        hidden = await run_sync(
-                            self._run_hidden_tests, issue_id, run_result.run_id, sandbox
-                        )
-            hidden_seconds = 0 if fake else time.monotonic() - hidden_started
-            evaluation_budget["evaluation_seconds"] = (
-                evaluation_budget.get("evaluation_seconds", 0) + hidden_seconds
-            )
-            evaluation_budget["evaluation_remaining_seconds"] = max(
-                0, evaluation_budget.get("evaluation_remaining_seconds", 0) - hidden_seconds
-            )
-            evaluation_budget["remaining_seconds"] = max(
-                0, evaluation_budget.get("deadline_at", time.time()) - time.time()
             )
             if fake:
                 status = "PASS" if run_result.status == "completed" else "FAIL"
@@ -182,12 +146,8 @@ class EvalRunner:
             else:
                 status = "PASS" if hidden.get("passed") else "FAIL"
                 reason = hidden.get("details")
-            final_diff = outcome.final_diff
-            state = (
-                DevPilotState.model_validate(outcome.state)
-                if outcome.state
-                else DevPilotState(run_id=run_result.run_id, task=task, phase=run_result.phase)
-            )
+            final_diff = self._save_final_diff(run_result.run_id, runner.sandbox)
+            state = self._load_state(run_result.run_id, runner.sandbox)
             metrics = self._collect_metrics(run_result, state)
             total = visible.get("passed", 0) + visible.get("failed", 0)
             evaluation = EvalResult(
@@ -210,15 +170,16 @@ class EvalRunner:
                 runtime_duration_ms=run_result.duration_ms or 0,
                 agent_status=run_result.status,
                 error=run_result.error,
-                token_usage=outcome.statistics.get("tokens"),
-                known_tokens=outcome.statistics.get("known_tokens", 0),
+                token_usage=runner.metrics.to_dict()["tokens"]
+                if hasattr(runner, "metrics")
+                else None,
+                known_tokens=runner.metrics.tokens_used if hasattr(runner, "metrics") else 0,
                 llm_requests=run_result.budget.get("llm_requests", 0),
                 verification={"visible": visible, "hidden": hidden, "added": evidence.get("added")},
                 artifact_errors=run_result.artifact_errors,
                 recovery_file=run_result.recovery_file,
-                budget=evaluation_budget,
             )
-            self._persist_evaluation(evaluation, sandbox)
+            self._persist_evaluation(evaluation, runner.sandbox)
             return evaluation
         except Exception as exc:
             evaluation = EvalResult(
@@ -233,8 +194,8 @@ class EvalRunner:
                 agent_status="failed",
             )
             sandbox = (
-                sandbox
-                if "sandbox" in locals()
+                runner.sandbox
+                if "runner" in locals()
                 else SandboxWorkspace(str(self.base_repo), runs_root=self.settings.runs_root)
             )
             self._persist_evaluation(evaluation, sandbox)
@@ -274,17 +235,24 @@ class EvalRunner:
             results.append(result)
         return results
 
-    def _init_components(self, fake=False, on_event=None) -> RuntimePort:
-        options = dict(
-            config=self.config,
+    def _init_components(
+        self,
+        fake: bool = False,
+        on_event: Callable[[str, dict], None] | None = None,
+    ) -> AgentRunner:
+        """Resolve the default lazily; callers can inject another runtime factory."""
+        factory = self.runner_factory
+        if factory is None:
+            from devpilot.cli import initialize_components
+
+            factory = initialize_components
+        return factory(
+            self.config,
             fake=fake,
             base_repo=None if fake else str(self.base_repo),
             on_event=on_event,
             settings=self.settings,
         )
-        if self.runner_factory is not None:
-            return self.runner_factory(**options)
-        return create_runtime(**options)
 
     def _check_visible_tests(self, run_result: AgentRunResult) -> float:
         """Check visible test pass rate from run result.
@@ -334,10 +302,7 @@ class EvalRunner:
                 "pass_rate": None,
                 "details": "Missing or placeholder hidden tests",
             }
-        if (
-            current_policy.get().deadline is not None
-            and time.monotonic() >= current_policy.get().deadline
-        ):
+        if getattr(self, "deadline", None) is not None and time.monotonic() >= self.deadline:
             return {
                 "status": "ERROR",
                 "passed": False,
@@ -353,8 +318,7 @@ class EvalRunner:
             Path(sandbox.get_runs_dir(run_id)) / "hidden",
             self.settings.test_python,
             timeout=self.config.test_timeout_seconds,
-            deadline=current_policy.get().deadline,
-            cancel=current_policy.get().cancel,
+            deadline=getattr(self, "deadline", None),
             output_limit=self.config.max_test_output_bytes,
             secrets=(self.settings.api_key,),
             trusted_fixtures=self.hidden_tests_dir.resolve()
@@ -399,7 +363,7 @@ class EvalRunner:
             return saved.read_text(encoding="utf-8")
         workspace_repo = Path(sandbox.get_repo_path(run_id))
         try:
-            result = capture_process(
+            result = subprocess.run(
                 ["git", "diff", "HEAD", "--no-color"],
                 cwd=str(workspace_repo),
                 capture_output=True,

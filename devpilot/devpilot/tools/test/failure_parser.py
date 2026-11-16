@@ -14,7 +14,9 @@ _FAIL_HEADER_RE = re.compile(r"_{5,}\s+(.+?)\s+_{5,}")
 
 # Final exception line in a short traceback, e.g.
 #   E   TypeError: list_orders() got an unexpected keyword argument 'status'
-_EXC_RE = re.compile(r"^E\s+(\w+(?:Error|Exception)):\s*(.+)", re.MULTILINE)
+_EXC_RE = re.compile(
+    r"^E\s+(\w+(?:Error|Exception)):\s*(.+)", re.MULTILINE
+)
 
 # Bare assertion line in a short traceback, e.g.  E   assert 1 == 2
 _ASSERT_RE = re.compile(r"^E\s+(assert\s.+)$", re.MULTILINE)
@@ -23,7 +25,9 @@ _ASSERT_RE = re.compile(r"^E\s+(assert\s.+)$", re.MULTILINE)
 _FILE_LONG_RE = re.compile(r'File\s+"([^"]+)",\s+line\s+(\d+)')
 
 # Short-traceback file references:  app/services/order_service.py:45: in list_orders
-_FILE_SHORT_RE = re.compile(r"^(\s*)(\S[^:\n]*?\.py):(\d+):\s+in\s", re.MULTILINE)
+_FILE_SHORT_RE = re.compile(
+    r"^(\s*)(\S[^:\n]*?\.py):(\d+):\s+in\s", re.MULTILINE
+)
 
 
 def parse_test_failures(stdout: str, stderr: str = "") -> dict[str, Any]:
@@ -119,10 +123,15 @@ def parse_test_failures(stdout: str, stderr: str = "") -> dict[str, Any]:
 
 def _is_covered(name: str, existing: list[str]) -> bool:
     """Return True if *name* is already represented by an entry in *existing*."""
-    return any(name == entry or name in entry or entry.endswith(f"::{name}") for entry in existing)
+    return any(
+        name == entry or name in entry or entry.endswith(f"::{name}")
+        for entry in existing
+    )
 
 
-def _extract_traceback_locations(text: str, near_pos: int, window: int = 2000) -> list[str]:
+def _extract_traceback_locations(
+    text: str, near_pos: int, window: int = 2000
+) -> list[str]:
     """Extract ``file:line`` locations near *near_pos* (looking backwards).
 
     Handles both the long (``File "...", line N``) and short

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from tests.verifier_stub import PassingVerifier
 
 import pytest
 
@@ -44,7 +45,6 @@ from devpilot.tools.repo import ListFiles, ReadFile, SearchCode
 from devpilot.tools.test import RunTests
 from devpilot.tracing import MetricsCollector, TraceWriter
 from devpilot.workspace.sandbox import SandboxWorkspace
-from tests.verifier_stub import PassingVerifier
 
 # --------------------------------------------------------------------------- #
 # Helpers

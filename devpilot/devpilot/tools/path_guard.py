@@ -24,10 +24,7 @@ class PathGuard:
     FORBIDDEN_PATTERNS = [".env", "id_rsa", "id_ed25519"]
 
     def __init__(self, workspace_root: str) -> None:
-        root = Path(workspace_root)
-        if linked(root):
-            raise PermissionError("Linked workspace root is not permitted")
-        self.workspace_root = root.resolve()
+        self.workspace_root = Path(workspace_root).resolve()
 
     def validate_path(self, path: str) -> Path:
         """Validate and return the resolved path.

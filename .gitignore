@@ -36,3 +36,6 @@ Thumbs.db
 
 # TRAE spec 目录
 .trae/
+
+web/node_modules/
+web/dist/

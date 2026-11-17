@@ -346,3 +346,7 @@ V7    Logs / Metrics / Incident / SRE Agent
 ---
 
 *DevPilot V1 — 把"决策 → 工具 → 观察 → 状态 → 验证"这一条链真正做扎实。*
+
+## 本地可视化工作台
+
+运行 workbench.ps1 -Build 启动 React + FastAPI 工作台，提供真实任务执行、事件时间线、验证证据、Diff、历史回放与 DEV-001 业务对比。详见 [工作台使用说明](docs/workbench.md)。
